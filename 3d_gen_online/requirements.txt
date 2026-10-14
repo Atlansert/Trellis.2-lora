@@ -1,0 +1,10 @@
+fastapi==0.116.1
+
+uvicorn[standard]==0.34.0
+
+pydantic==2.10.6
+pydantic-core==2.27.2
+volcengine-python-sdk[ark]
+
+requests==2.32.3
+pillow
