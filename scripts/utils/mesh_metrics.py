@@ -10,6 +10,10 @@
   boundary_frac   : 边界边（仅 1 个相邻面）占比 —— 破洞/开口的直接体现
   n_components    : 顶点连通分量数 —— 破洞会把网格切成多块
   watertight      : 是否所有边都恰好有 2 个相邻面
+
+CLI: mesh_metrics.py <glb 或目录>... [--json out.json]
+输出：stdout 指标表，可选写 --json 指定的 JSON 文件；只读 GLB，不改动输入。
+安全边界：纯 CPU（numpy/trimesh/scipy），不加载权重、不需要 GPU。
 """
 import os
 import sys
@@ -21,6 +25,7 @@ import numpy as np
 
 
 def load_geometry(path):
+    """读网格的 (顶点, 面)；若载入结果是 Scene，则把各子网格的顶点索引偏移后合并成一个网格。"""
     import trimesh
     try:
         m = trimesh.load(path, force='mesh', process=False, skip_materials=True)
@@ -38,6 +43,7 @@ def load_geometry(path):
 
 
 def metrics(path):
+    """算单个网格的全部指标：点/面数、边统计（边界/非流形/是否封闭）、二面角分布、面积与 bbox。"""
     v, f = load_geometry(path)
     out = {'file': os.path.basename(os.path.dirname(path)) + '/' + os.path.basename(path),
            'n_vertices': int(len(v)), 'n_faces': int(len(f))}
@@ -98,6 +104,7 @@ def metrics(path):
 
 
 def main():
+    """把命令行给的 GLB 逐个算指标并打印表格（支持目录展开 glob）；无可用文件返回 1，成功返回 0。"""
     ap = argparse.ArgumentParser()
     ap.add_argument('glbs', nargs='+')
     ap.add_argument('--json', default=None)

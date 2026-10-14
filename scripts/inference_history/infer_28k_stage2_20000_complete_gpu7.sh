@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：补跑 Stage1(28k) + Stage2(20k) 的 step020000 这一档，把结果补进统一目录，固定 GPU 7。
+# 用法：bash scripts/inference_history/infer_28k_stage2_20000_complete_gpu7.sh（无参数）。
+# 输出：results_infer/data_test_stage1_lora_028000_stage2_lora_1024/step020000/（GLB、infer.log），日志在上级 run.log。
+# 边界：会 mkdir 输出目录并跑 GPU 推理（--no_video）；已满 8 个 GLB 则跳过，不足 8 个退出码 3。
 # Complete step20000 for Stage1(28k) + Stage2(20k) into the unified results dir.
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"

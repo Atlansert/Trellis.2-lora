@@ -4,6 +4,9 @@
 
 用法:
   final_verify.py tag=dir [tag=dir ...]
+
+输出：stdout 对照表（tag=results_infer 子目录 × 默认 001..004 每图一行：长度轴/bbox/点数/面数/二面角）。
+安全边界：只读 GLB，不写任何文件；纯 CPU/trimesh，不改动实验产物；缺图或读取失败只打印标记不中断。
 """
 import argparse
 import glob
@@ -14,6 +17,7 @@ import numpy as np
 
 
 def metrics(path):
+    """读 GLB 的 bbox/点数/面数，并只对"恰好被 2 个面共享"的边统计二面角均值与 p95；无面时只返回基础信息。"""
     import trimesh
     m = trimesh.load(path, force='mesh', process=False, skip_materials=True)
     v = np.asarray(m.vertices, dtype=np.float64)
@@ -46,6 +50,7 @@ def metrics(path):
 
 
 def main():
+    """按 tag=目录 逐个实验、逐图输出朝向与几何质量对照表（长度轴为 z 视为规范）；返回 0。"""
     ap = argparse.ArgumentParser()
     ap.add_argument('dirs', nargs='+', help='tag=results_infer/<子目录>')
     ap.add_argument('--images', nargs='+', default=['001', '002', '003', '004'])

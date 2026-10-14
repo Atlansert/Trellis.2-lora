@@ -1,3 +1,8 @@
+"""自适应梯度裁剪：按最近若干步梯度范数的分位数自动确定 clip 阈值。
+
+维护一个环形 buffer 记录历史 grad_norm，攒满后取 clip_percentile 分位数作为 _max_norm
+（若设了 max_norm 则再取 min 作为上限），__call__ 的逻辑与 clip_grad_norm_ 完全一致。
+"""
 from typing import *
 import torch
 import numpy as np
@@ -47,6 +52,8 @@ class AdaptiveGradClipper:
 
     def __call__(self, parameters, norm_type=2.0, error_if_nonfinite=False, foreach=None):
         """Clip the gradient norm of an iterable of parameters.
+
+        正常裁剪后把本次 grad_norm 存入 buffer，攒满时更新自适应阈值 _max_norm。
 
         The norm is computed over all gradients together, as if they were
         concatenated into a single vector. Gradients are modified in-place.

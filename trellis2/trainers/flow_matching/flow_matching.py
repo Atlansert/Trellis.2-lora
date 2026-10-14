@@ -1,3 +1,12 @@
+"""基础 flow matching 训练器（稠密张量版）。
+
+职责：在 BasicTrainer 之上实现 flow matching 目标——对干净样本 x_0 按时步 t 加噪得到 x_t，
+让 denoiser 预测速度场 v = (1-σ_min)·noise - x_0，用 MSE 训练；并提供采样/快照可视化。
+输入：x_0（[N x C x ...] 干净潜变量）与 cond；输出：terms['loss']（标量，另按时间桶记录 mse）。
+契约：t ∈ [0,1]；噪声项系数为 σ_min + (1-σ_min)·t（保证 t=0 时几乎无噪）。
+条件接口（get_cond/get_inference_cond/vis_cond）在此为空实现，由 CFG/文本/图像 mixin 覆盖。
+"""
+
 from typing import *
 import copy
 import torch
@@ -17,6 +26,9 @@ from .mixins.image_conditioned import ImageConditionedMixin
 class FlowMatchingTrainer(BasicTrainer):
     """
     Trainer for diffusion model with flow matching objective.
+    
+    flow matching 训练器基类：实现加噪/去噪、速度场目标、时间步采样与快照采样；
+    训练循环、保存/恢复等由 BasicTrainer 提供。
     
     Args:
         models (dict[str, nn.Module]): Models to train.
@@ -83,6 +95,7 @@ class FlowMatchingTrainer(BasicTrainer):
         Returns:
             x_t, the noisy version of x_0 under timestep t.
         """
+        # x_t = (1-t)·x_0 + (σ_min + (1-σ_min)·t)·noise，t 会被广播到与 x_0 同秩
         if noise is None:
             noise = torch.randn_like(x_0)
         assert noise.shape == x_0.shape, "noise must have same shape as x_0"
@@ -95,6 +108,7 @@ class FlowMatchingTrainer(BasicTrainer):
     def reverse_diffuse(self, x_t: torch.Tensor, t: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
         """
         Get original image from noisy version under timestep t.
+        由 x_t 与噪声反解 x_0，是 diffuse 的逆运算（用于把预测结果/中间态还原到数据空间）。
         """
         assert noise.shape == x_t.shape, "noise must have same shape as x_t"
         t = t.view(-1, *[1 for _ in range(len(x_t.shape) - 1)])
@@ -104,36 +118,42 @@ class FlowMatchingTrainer(BasicTrainer):
     def get_v(self, x_0: torch.Tensor, noise: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """
         Compute the velocity of the diffusion process at time t.
+        速度场真值（回归目标）：v = (1-σ_min)·noise - x_0，与 t 无关。
         """
         return (1 - self.sigma_min) * noise - x_0
 
     def get_cond(self, cond, **kwargs):
         """
         Get the conditioning data.
+        无条件基类：原样返回 cond；带条件的训练器由 mixin 覆盖此方法。
         """
         return cond
     
     def get_inference_cond(self, cond, **kwargs):
         """
         Get the conditioning data for inference.
+        推理用：打包成 {'cond': ...} 交给采样器（CFG mixin 会再补 neg_cond）。
         """
         return {'cond': cond, **kwargs}
 
     def get_sampler(self, **kwargs) -> samplers.FlowEulerSampler:
         """
         Get the sampler for the diffusion process.
+        无引导的欧拉采样器；CFG 版本由 guidance mixin 覆盖为带引导区间的采样器。
         """
         return samplers.FlowEulerSampler(self.sigma_min)
     
     def vis_cond(self, **kwargs):
         """
         Visualize the conditioning data.
+        无条件基类无可视化内容，返回空 dict。
         """
         return {}
 
     def sample_t(self, batch_size: int) -> torch.Tensor:
         """
         Sample timesteps.
+        按配置的 t_schedule 采样 t：uniform 为均匀分布；logitNormal 为 sigmoid(mean+std·N(0,1))。
         """
         if self.t_schedule['name'] == 'uniform':
             t = torch.rand(batch_size)
@@ -163,13 +183,15 @@ class FlowMatchingTrainer(BasicTrainer):
             a dict with the key "loss" containing a tensor of shape [N].
             may also contain other keys for different terms.
         """
+        # 首次调用时打印一次 shape，便于排查 batch/条件维度问题
         if not hasattr(self, '_dbg_shapes'):
             print('[DEBUG shapes]', x_0.shape, getattr(cond,'shape',None), flush=True); self._dbg_shapes=True
         noise = torch.randn_like(x_0)
         t = self.sample_t(x_0.shape[0]).to(x_0.device).float()
-        x_t = self.diffuse(x_0, t, noise=noise)
-        cond = self.get_cond(cond, **kwargs)
+        x_t = self.diffuse(x_0, t, noise=noise)     # 加噪样本
+        cond = self.get_cond(cond, **kwargs)        # 条件（含 CFG 随机丢弃）
         
+        # 注意：网络的时间输入放大 1000 倍（t*1000），与推理采样器保持一致
         pred = self.training_models['denoiser'](x_t, t * 1000, cond, **kwargs)
         assert pred.shape == noise.shape == x_0.shape
         target = self.get_v(x_0, noise, t)
@@ -178,6 +200,7 @@ class FlowMatchingTrainer(BasicTrainer):
         terms["loss"] = terms["mse"]
 
         # log loss with time bins
+        # 按 t 分成 10 个区间分别统计 mse，便于观察不同噪声水平下的收敛情况
         mse_per_instance = np.array([
             F.mse_loss(pred[i], target[i]).item()
             for i in range(x_0.shape[0])
@@ -196,6 +219,7 @@ class FlowMatchingTrainer(BasicTrainer):
         batch_size: int,
         verbose: bool = False,
     ) -> Dict:
+        # 注意：对数据集做 deepcopy 再建临时 DataLoader，避免影响训练侧的采样顺序/状态
         dataloader = DataLoader(
             copy.deepcopy(self.dataset),
             batch_size=batch_size,
@@ -218,6 +242,7 @@ class FlowMatchingTrainer(BasicTrainer):
             cond_vis.append(self.vis_cond(**data))
             del data['x_0']
             args = self.get_inference_cond(**data)
+            # 快照采样默认 50 步 / CFG=3.0；snapshot_sampler_params 可覆盖为线上 pipeline 参数
             snap_params = {'steps': 50, 'guidance_strength': 3.0}
             snap_params.update(self.snapshot_sampler_params)
             res = sampler.sample(
@@ -246,6 +271,8 @@ class FlowMatchingTrainer(BasicTrainer):
 class FlowMatchingCFGTrainer(ClassifierFreeGuidanceMixin, FlowMatchingTrainer):
     """
     Trainer for diffusion model with flow matching objective and classifier-free guidance.
+    
+    flow matching + CFG：MRO 中 CFG mixin 在前，覆盖条件处理与采样器。
     
     Args:
         models (dict[str, nn.Module]): Models to train.
@@ -286,6 +313,8 @@ class TextConditionedFlowMatchingCFGTrainer(TextConditionedMixin, FlowMatchingCF
     """
     Trainer for text-conditioned diffusion model with flow matching objective and classifier-free guidance.
     
+    文本条件 + CFG：条件来自 CLIP 文本编码，负条件为空串编码。
+    
     Args:
         models (dict[str, nn.Module]): Models to train.
         dataset (torch.utils.data.Dataset): Dataset.
@@ -325,6 +354,8 @@ class TextConditionedFlowMatchingCFGTrainer(TextConditionedMixin, FlowMatchingCF
 class ImageConditionedFlowMatchingCFGTrainer(ImageConditionedMixin, FlowMatchingCFGTrainer):
     """
     Trainer for image-conditioned diffusion model with flow matching objective and classifier-free guidance.
+    
+    图像条件 + CFG：条件来自 DINO 图像特征，负条件为全零特征。
     
     Args:
         models (dict[str, nn.Module]): Models to train.

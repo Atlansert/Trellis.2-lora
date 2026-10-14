@@ -1,3 +1,9 @@
+"""图像/几何相关的损失与指标（均为可直接调用的无状态函数）。
+
+- 基础损失：smooth_l1 / l1 / l2；图像指标：psnr / ssim（高斯滑窗）/ lpips（懒加载 VGG 权重）。
+- normal_angle：把 [0,1] 的法线图还原到 [-1,1] 后算法线夹角（度），全零法线会被剔除，无有效像素时返回 -1。
+- create_window 给出 SSIM 用的高斯窗（按通道数扩展）。
+"""
 import torch
 import torch.nn.functional as F
 from torch.autograd import Variable
@@ -71,6 +77,7 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
 
 loss_fn_vgg = None
 def lpips(img1, img2, value_range=(0, 1)):
+    """LPIPS 感知距离；首次调用时构建 VGG 网络，输入按 value_range 归一化到 [-1,1]。"""
     global loss_fn_vgg
     if loss_fn_vgg is None:
         loss_fn_vgg = LPIPS(net='vgg').cuda().eval()
@@ -81,6 +88,7 @@ def lpips(img1, img2, value_range=(0, 1)):
 
 
 def normal_angle(pred, gt):
+    """预测/真值法线（[0,1] 编码）之间的平均夹角（度）；无有效法线返回 -1。"""
     pred = pred * 2.0 - 1.0
     gt = gt * 2.0 - 1.0
     norms = pred.norm(dim=-1) * gt.norm(dim=-1)

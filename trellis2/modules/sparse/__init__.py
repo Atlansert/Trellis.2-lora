@@ -1,3 +1,10 @@
+"""稀疏张量子包入口：按属性名懒加载各子模块（避免循环导入与一次性加载开销）。
+
+__attributes 建立“对外符号 -> 所在子模块文件”的映射，首次访问时由 __getattr__
+importlib 导入并缓存到 globals()。核心概念：VarLenTensor（变长批量稀疏张量）、
+SparseTensor（带 coords 的稀疏张量，coords 每行 4 列 (batch, x, y, z)）。
+"""
+
 from . import config
 import importlib
 
@@ -42,6 +49,7 @@ __submodules = ['transformer', 'conv']
 __all__ = list(__attributes.keys()) + __submodules
 
 def __getattr__(name):
+    # 惰性导入：首次访问某符号时才 import 对应子模块并把属性挂到本包上
     if name not in globals():
         if name in __attributes:
             module_name = __attributes[name]

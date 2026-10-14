@@ -1,3 +1,12 @@
+"""稀疏 3D U-Net VAE 的通用组件与编解码器（shape/texture SLat 所属 SC-VAE 的基础实现）。
+
+- 所有张量都是稀疏的 sp.SparseTensor：coords 为 (batch, x, y, z)，feats 为 (N, C)。
+- 上/下采样有两条路：nearest 走 SparseDownsample/SparseUpsample（保持通道数），
+  spatial2channel 走 SparseSpatial2Channel/SparseChannel2Spatial（把 2³ 个空间位置折进/取出通道维）。
+- 上采样块额外预测 subdivision（to_subdiv 输出 8 个 logits），决定上采样后 8 个子体素哪些保留，
+  训练时用 gt subdivision 监督，推理时可引导(guide_subs)或返回预测(subs)。
+- 编码器输出 2*latent_channels，沿 feats 最后一维切成 mean / logvar。
+"""
 from typing import *
 import torch
 import torch.nn as nn
@@ -9,6 +18,7 @@ from ...modules.norm import LayerNorm32
 
 
 class SparseResBlock3d(nn.Module):
+    """稀疏残差块：可选下/上采样；resample_mode='spatial2channel' 时用通道折叠代替空间重采样。"""
     def __init__(
         self,
         channels: int,
@@ -57,6 +67,7 @@ class SparseResBlock3d(nn.Module):
                 self.updown = sp.SparseChannel2Spatial(2)
 
     def _updown(self, x: sp.SparseTensor, subdiv: sp.SparseTensor = None) -> sp.SparseTensor:
+        # 上采样时需要 subdiv：>0 的子体素保留，否则丢弃
         if self.downsample:
             x = self.updown(x)
         elif self.upsample:
@@ -91,6 +102,7 @@ class SparseResBlock3d(nn.Module):
 
 
 class SparseResBlockDownsample3d(nn.Module):
+    """固定 2 倍下采样的稀疏残差块（SparseDownsample，通道数不折叠）。"""
     def __init__(
         self,
         channels: int,
@@ -129,6 +141,7 @@ class SparseResBlockDownsample3d(nn.Module):
 
 
 class SparseResBlockUpsample3d(nn.Module):
+    """固定 2 倍上采样的稀疏残差块：pred_subdiv=True 时自己预测 8 路 subdivision 并一并返回。"""
     def __init__(
         self,
         channels: int,
@@ -177,6 +190,7 @@ class SparseResBlockUpsample3d(nn.Module):
 
 
 class SparseResBlockS2C3d(nn.Module):
+    """空间→通道(spatial2channel)的稀疏残差块：2³ 邻域折进通道维，等效 2 倍下采样。"""
     def __init__(
         self,
         channels: int,
@@ -215,6 +229,7 @@ class SparseResBlockS2C3d(nn.Module):
 
 
 class SparseResBlockC2S3d(nn.Module):
+    """通道→空间(channel2spatial)的稀疏残差块：通道展开回 2³ 邻域，等效 2 倍上采样并预测 subdivision。"""
     def __init__(
         self,
         channels: int,
@@ -263,6 +278,7 @@ class SparseResBlockC2S3d(nn.Module):
         
     
 class SparseConvNeXtBlock3d(nn.Module):
+    """稀疏 ConvNeXt 块：3x3x3 稀疏卷积 + LayerNorm + MLP 残差（MLP 末层零初始化）。"""
     def __init__(
         self,
         channels: int,
@@ -297,6 +313,9 @@ class SparseConvNeXtBlock3d(nn.Module):
 class SparseUnetVaeEncoder(nn.Module):
     """
     Sparse Swin Transformer Unet VAE model.
+
+    输入稀疏张量，逐级 blocks（每级 num_blocks 个 block 后接一个下采样块）编码，
+    末尾 to_latent 输出 2*latent_channels 并按 feats 最后一维切成 mean / logvar。
     """
     def __init__(
         self,
@@ -317,8 +336,10 @@ class SparseUnetVaeEncoder(nn.Module):
         self.dtype = torch.float16 if use_fp16 else torch.float32
 
         self.input_layer = sp.SparseLinear(in_channels, model_channels[0])
+        # 输出 2 倍通道：前一半 mean、后一半 logvar
         self.to_latent = sp.SparseLinear(model_channels[-1], 2 * latent_channels)
         
+        # blocks[i] = 第 i 级分辨率的若干 block + 一个下采样块（最后一级不加）
         self.blocks = nn.ModuleList([])
         for i in range(len(num_blocks)):
             self.blocks.append(nn.ModuleList([]))
@@ -398,6 +419,9 @@ class SparseUnetVaeEncoder(nn.Module):
 class SparseUnetVaeDecoder(nn.Module):
     """
     Sparse Swin Transformer Unet VAE model.
+
+    从 latent 稀疏张量逐级解码（每级若干 block 后接一个上采样块，最后一级直接出 output_layer）。
+    pred_subdiv=True 时由解码器自己预测 subdivision；False 时必须用 guide_subs 引导上采样。
     """
     def __init__(
         self,
@@ -476,6 +500,7 @@ class SparseUnetVaeDecoder(nn.Module):
         self.apply(_basic_init)
 
     def forward(self, x: sp.SparseTensor, guide_subs: Optional[List[sp.SparseTensor]] = None, return_subs: bool = False) -> sp.SparseTensor:
+        # pred_subdiv 与 guide_subs/return_subs 互斥：自己预测 subdivision 才需要返回或监督它
         assert guide_subs is None or self.pred_subdiv == False, "Only decoders with pred_subdiv=False can be used with guide_subs"
         assert return_subs == False or self.pred_subdiv == True, "Only decoders with pred_subdiv=True can be used with return_subs"
         
@@ -486,8 +511,10 @@ class SparseUnetVaeDecoder(nn.Module):
         for i, res in enumerate(self.blocks):
             for j, block in enumerate(res):
                 if i < len(self.blocks) - 1 and j == len(res) - 1:
+                    # 每级的最后一个 block 是上采样块
                     if self.pred_subdiv:
                         if self.training:
+                            # 训练时记录 gt subdivision 以便算监督损失
                             subs_gt.append(h.get_spatial_cache('subdivision'))
                         h, sub = block(h)
                         subs.append(sub)
@@ -507,6 +534,7 @@ class SparseUnetVaeDecoder(nn.Module):
                 return h
     
     def upsample(self, x: sp.SparseTensor, upsample_times: int) -> torch.Tensor:
+        # 只跑到第 upsample_times 级，返回该级上采样后的稀疏坐标（不跑完整解码）
         assert self.pred_subdiv == True, "Only decoders with pred_subdiv=True can be used with upsampling"
         
         h = self.from_latent(x)

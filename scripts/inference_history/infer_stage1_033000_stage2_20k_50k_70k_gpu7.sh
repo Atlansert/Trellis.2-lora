@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：Stage1 SS LoRA 固定 33000，Stage2 shape LoRA 依次跑 20000/50000/70000 三档，对 data_test 全量串行推理，GPU 7。
+# 用法：bash scripts/inference_history/infer_stage1_033000_stage2_20k_50k_70k_gpu7.sh（无参数）。
+# 输出：results_infer/data_test_stage1_lora_033000_stage2_lora_<step>/（GLB、run.log、infer.log）；每档已有等量 GLB 则跳过。
+# 边界：会 mkdir 输出目录并跑 GPU 推理（--no_video）；缺 stage2 权重退 2，某档 GLB 不足退 3。
 # Stage1 SS LoRA step 33000 + Stage2 shape-flow LoRA steps 20000/50000/70000
 # sequential inference on full data_test (8 images), GPU 7.
 set -uo pipefail

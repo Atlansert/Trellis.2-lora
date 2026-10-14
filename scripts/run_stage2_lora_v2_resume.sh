@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：Stage-2（1024 shape flow）LoRA v2 配方续训：从 step 8000 续到 20000，固定 GPU 4。
+# 用法：bash scripts/run_stage2_lora_v2_resume.sh（无参数）；--ckpt 8000 会连优化器/EMA/lr 调度状态一起恢复。
+# 输出：results/multiview_1186_flow_1024_lora_v2/（同目录续写，log.txt 追加）。
+# 边界：长跑 GPU 训练任务，持续写该输出目录；只读 training_data/ 与 configs/。
 # Stage 2 (1024 shape flow) LoRA, v2 recipe — RESUME from step 8000 to 20000.
 # Same recipe as run_stage2_lora_v2.sh (rank8/alpha8, EMA 0.9999, logitNormal,
 # p_uncond 0.1, lr 1e-4). Resume via --ckpt 8000 so optimizer/EMA/lr-scheduler

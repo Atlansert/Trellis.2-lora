@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：批量推理 data_test 全量：SS LoRA 固定 33000 + shape flow 固定 20000 + 指定步数的 Texture LoRA，1024 管线。
+# 用法：bash scripts/infer_ss33k_shape20k_texN_gpu.sh <tex_step> <gpu>（步数补零到 7 位拼权重名）。
+# 输出：results_infer/data_test_ss33k_shape20k_texflow<step>/（GLB、run.log、infer.log）；已有等量 GLB 则跳过。
+# 边界：会 mkdir 输出目录并调用 scripts/infer_finetuned.py（GPU 推理、--no_video）；不完整时退出码 3。
 # Usage: $0 <tex_step> <gpu>   (ss fixed 33000, shape flow fixed 20000, full data_test)
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"

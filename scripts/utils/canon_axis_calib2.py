@@ -6,6 +6,9 @@
 因此先把 GT 体素用 SS VAE 编码再解码成实心占据体，再与 base 比较。
 
 对 6 种轴置换分别评估，取平均 IoU 最高者。只有 3-cycle 是纯旋转，对换会引入镜像。
+
+运行：无参数（N_OBJ/VIEWS/ENC 为文件内常量）；需 GPU（默认卡 5），脚本内已 chdir 到项目根。
+安全边界：只读 GT npz、renders_cond 图与 SS 编码器/管线权重，不写任何文件；纯标定实验。
 """
 import os
 import sys
@@ -28,12 +31,13 @@ P = dict(steps=12, guidance_strength=7.5, guidance_rescale=0.7,
          guidance_interval=[0.6, 1.0], rescale_t=5.0)
 ROOT = 'training_data/multiview_1186'
 VOX = 'ss_view_voxels_canon'
-ENC = '/data/lzx/TRELLIS/checkpoints/ckpts/ss_enc_conv3d_16l8_fp16'
+ENC = '/data/lzx/TRELLIS/checkpoints/ckpts/ss_enc_conv3d_16l8_fp16'   # SS 编码器权重（把体素编成 latent）
 N_OBJ = 16
 VIEWS = [0, 6, 12, 18]
 
 
 def main():
+    """对若干对象/视角：base 采样占据体，与"按置换 p 摆放后经 SS VAE 编解码成实心"的 GT 比 IoU，6 种置换排序。"""
     pipe = Trellis2ImageTo3DPipeline.from_pretrained('checkpoints')
     pipe.cuda()
     dec = pipe.models['sparse_structure_decoder'].cuda()
@@ -44,6 +48,9 @@ def main():
     perms = list(itertools.permutations(range(3)))
 
     def gt_occ(path, perm):
+        """读 GT 体素、按置换 perm 重排轴，再经 SS 编码器+解码器转成"实心"占据体：
+        解码后才是实心，才能与 base 的实心输出公平比 IoU。
+        """
         c = np.load(path)['coords'].astype(np.int64)
         if len(c):
             c = c[:, perm]
@@ -56,6 +63,7 @@ def main():
         return o
 
     def iou(a, b):
+        """体素 IoU；两者都空时定义为 0。"""
         u = (a | b).sum()
         return float((a & b).sum()) / u if u else 0.0
 

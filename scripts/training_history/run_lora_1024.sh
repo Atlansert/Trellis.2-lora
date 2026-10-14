@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：Stage-2（1024 shape flow）LoRA 训练（首版配方），固定用 GPU 7。
+# 用法：bash scripts/training_history/run_lora_1024.sh（无参数）；--ckpt none 从预训练权重开始。
+# 输出：results/multiview_1186_flow_1024_lora/（checkpoint、log）。
+# 边界：长跑 GPU 训练任务，持续写该输出目录；只读 training_data/ 与 configs/。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

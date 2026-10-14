@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：守候型 watcher：等 DINOv3 版 SS LoRA 的 10k..50k 检查点逐个出现，出现一档就跑一次扫描推理。
+# 用法：bash scripts/utils/sweep_watch.sh [gpu，默认 7]；内部轮询 sleep 120，可长时间常驻。
+# 输出：results_infer/_sweep_watch.log（总日志）+ 各档自己的结果目录；会 mkdir results_infer。
+# 边界：只读检查点并调用 infer_ss_dinov3_sweep_gpu.sh（GPU 推理）；不会训练、不改权重。
 # 等待 SS 检查点出现后，逐个执行 task 4 的推理扫描（10k..50k，每 10k 一档）。
 #
 # Usage: $0 <gpu>

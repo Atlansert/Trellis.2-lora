@@ -12,6 +12,9 @@
 
 若偏差普遍接近 0，说明按档位挑选已足够；若普遍接近 ±7.5°，则应改为在
 **精确侧视角**重新体素化规范帧。
+
+运行：无参数（ROOT/VOX 为文件内常量，需在项目根下执行）。
+安全边界：只读 ss_view_voxels_canon_v4/*.npz，不写文件；纯 CPU 统计，不需 GPU。
 """
 import glob
 import os
@@ -24,6 +27,7 @@ VOX = 'ss_view_voxels_canon_v4'
 
 
 def main():
+    """对每个对象用 24 档侧视度曲线做抛物线插值，统计"所选档位 vs 真实侧视方向"的偏航偏差分布；返回 0。"""
     objs = sorted(os.listdir(os.path.join(ROOT, VOX)))
     offs = []
     peak_ratio = []
@@ -43,6 +47,7 @@ def main():
             continue
         k = int(np.nanargmax(r))
         # 抛物线插值（环绕）
+        # 抛物线插值（环绕）：用峰值及其左右邻点估计真实峰位偏离档位的比例 d∈[-0.5,0.5] 档。
         rm, r0, rp = r[(k - 1) % n_view], r[k], r[(k + 1) % n_view]
         den = rm - 2 * r0 + rp
         d = 0.5 * (rm - rp) / den if abs(den) > 1e-9 else 0.0

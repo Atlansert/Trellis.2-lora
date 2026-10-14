@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：批量推理 data_test 全量图片：Stage1(SS) LoRA 固定 28000 步 + Stage2(shape) LoRA 指定步数，1024 管线。
+# 用法：bash scripts/infer_stage1_028000_stage2_N_gpu.sh <stage2_step> <gpu>（步数会补零到 7 位去拼权重名）。
+# 输出：results_infer/data_test_stage1_lora_028000_stage2_lora_<step>/（GLB、run.log、infer.log）；已有等量 GLB 则直接跳过。
+# 边界：会 mkdir 输出目录并调用 scripts/infer_finetuned.py（GPU 推理、--no_video）；缺图或不完整时退出码非 0（3）。
 # Usage: $0 <stage2_step> <gpu>   (stage1 fixed at 28000, full data_test)
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"

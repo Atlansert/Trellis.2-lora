@@ -7,6 +7,9 @@
 
 只有循环置换（3-cycle）才是纯旋转；对换会引入镜像。两种都测，用于判断是否存在
 手性差异。
+
+运行：无参数（N_OBJ/VIEWS 为文件内常量）；需 GPU（默认卡 5），脚本内已 chdir 到项目根。
+安全边界：只读 GT npz、renders_cond 图与 base 权重，不写任何文件；纯标定实验。
 """
 import os
 import sys
@@ -33,13 +36,15 @@ VIEWS = [0, 6, 12, 18]
 
 
 def main():
+    """对若干对象/视角：base 采样出占据体，与按 6 种轴置换摆放的 GT 比 IoU，按均值排序给出最可能的置换。"""
     pipe = Trellis2ImageTo3DPipeline.from_pretrained('checkpoints')
     pipe.cuda()
 
     objs = sorted(os.listdir(f'{ROOT}/{VOX}'))[:N_OBJ]
-    perms = list(itertools.permutations(range(3)))
+    perms = list(itertools.permutations(range(3)))   # 6 种置换：3 个循环(纯旋转) + 3 个对换(镜像)
 
     def occ_gt(path):
+        """读 GT 体素坐标并反填成 64³ 布尔占据体（越界坐标裁剪）。"""
         c = np.load(path)['coords'].astype(np.int64)
         o = np.zeros((64, 64, 64), bool)
         c = np.clip(c, 0, 63)
@@ -48,9 +53,11 @@ def main():
         return o
 
     def permute(o, p):
+        """按置换 p 重排占据体的三个轴（等价于把对象摆到另一套轴约定下）。"""
         return np.transpose(o, p)
 
     def iou(a, b):
+        """体素 IoU；两者都空时定义为 0。"""
         u = (a | b).sum()
         return float((a & b).sum()) / u if u else 0.0
 

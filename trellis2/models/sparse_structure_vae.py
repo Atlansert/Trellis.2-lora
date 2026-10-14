@@ -1,3 +1,11 @@
+"""稀疏结构(SS)的 3D VAE：把 64³ 体素占位场编码成 SS latent，再解码回来。
+
+- 编码器输出 2*latent_channels，前一半是 mean、后一半是 logvar；sample_posterior=True 时
+  按 N(mean, exp(logvar)) 采样，否则直接取 mean（return_raw 可同时拿到三者）。
+- 结构与常见 3D VAE 一致：input_layer → 若干 ResBlock + 下/上采样 → middle_block → out_layer，
+  ResBlock3d 的第二个卷积用 zero_module 初始化（残差支路从 0 开始）。
+- use_fp16 只影响主干 block 的推理 dtype，输入输出仍回到 x 的 dtype。
+"""
 from typing import *
 import torch
 import torch.nn as nn
@@ -20,6 +28,7 @@ def norm_layer(norm_type: str, *args, **kwargs) -> nn.Module:
 
 
 class ResBlock3d(nn.Module):
+    """3D 残差块：norm→SiLU→conv 两次，第二条 conv 零初始化，通道不同时用 1x1 conv 做 skip。"""
     def __init__(
         self,
         channels: int,
@@ -48,6 +57,7 @@ class ResBlock3d(nn.Module):
 
 
 class DownsampleBlock3d(nn.Module):
+    """2 倍下采样：stride=2 的 3x3x3 conv，或 avg_pool3d（后者要求进出通道相同）。"""
     def __init__(
         self,
         in_channels: int,
@@ -73,6 +83,7 @@ class DownsampleBlock3d(nn.Module):
 
 
 class UpsampleBlock3d(nn.Module):
+    """2 倍上采样：conv 到 8*out_channels 后 pixel_shuffle_3d，或 nearest 插值。"""
     def __init__(
         self,
         in_channels: int,
@@ -152,7 +163,7 @@ class SparseStructureEncoder(nn.Module):
         self.out_layer = nn.Sequential(
             norm_layer(norm_type, channels[-1]),
             nn.SiLU(),
-            nn.Conv3d(channels[-1], latent_channels*2, 3, padding=1)
+            nn.Conv3d(channels[-1], latent_channels*2, 3, padding=1)  # 翻倍输出 mean 与 logvar
         )
 
         if use_fp16:
@@ -194,6 +205,7 @@ class SparseStructureEncoder(nn.Module):
         h = h.type(x.dtype)
         h = self.out_layer(h)
 
+        # 通道对半切成 mean / logvar
         mean, logvar = h.chunk(2, dim=1)
 
         if sample_posterior:
@@ -207,6 +219,7 @@ class SparseStructureEncoder(nn.Module):
         return z
         
 
+# SS 解码器：从 SS latent 还原 64³ 体素占位场（输出 out_channels 个通道的 logits）
 class SparseStructureDecoder(nn.Module):
     """
     Decoder for Sparse Structure (\mathcal{D}_S in the paper Sec. 3.3).
@@ -298,6 +311,7 @@ class SparseStructureDecoder(nn.Module):
         h = h.type(self.dtype)
                 
         h = self.middle_block(h)
+        # blocks 内已按 channels 顺序交错排好 ResBlock 与上采样，逐层放到最高分辨率
         for block in self.blocks:
             h = block(h)
 

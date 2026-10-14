@@ -3,6 +3,10 @@
 
 对同一对象/视角，打印各来源占据体的三轴跨度 + 去顶视图 ASCII，
 用于判定"成品竖直板"到底源自 SS 的坐标系，还是源自预测本身已退化。
+
+CLI: [--obj 对象名(默认第一个)] [--view 0]
+输出：stdout 的跨度统计 + ASCII 侧视图（GT 视角帧/规范帧、base、各 LoRA）。
+安全边界：只读权重与数据，不写任何文件；需 GPU（默认卡 6）。
 """
 import os
 import sys
@@ -32,6 +36,7 @@ CH = ' .:-=+*#%@'
 
 
 def show(occ, label):
+    """打印占据体统计（体素数/三轴跨度/长轴）与 ASCII 侧视图：沿 y 取最大投影得到 x-z 平面。"""
     nz = np.argwhere(occ)
     if len(nz) == 0:
         print(f'  {label}: 空'); return
@@ -47,6 +52,7 @@ def show(occ, label):
 
 
 def main():
+    """对同一对象/视角依次展示：GT 两种帧的占据体、base 预测、以及三个 LoRA 的预测，用于对比朝向与退化程度。"""
     ap = argparse.ArgumentParser()
     ap.add_argument('--obj', default=None)
     ap.add_argument('--view', type=int, default=0)
@@ -59,6 +65,7 @@ def main():
     wdt = next(dec.parameters()).dtype
 
     def occ_lat(lat):
+        """把 GT latent 解码成 64³ 布尔占据体（>0 视为占据）。"""
         dec.cuda()
         return (dec(lat.to(wdt)) > 0)[0, 0].cpu().numpy()
 
@@ -86,6 +93,7 @@ def main():
     ten = ds._image(os.path.join(rr, obj, tf[a.view]['file_path']))
 
     def cond_of(t):
+        """用管线自带条件编码器（DINOv3@512）生成条件特征，neg_cond 置零。"""
         c = pipe.image_cond_model
         c.image_size = 512
         c.cuda()
@@ -93,6 +101,7 @@ def main():
         return {'cond': f, 'neg_cond': torch.zeros_like(f)}
 
     def sample(cond, seed=42):
+        """固定种子采样 SS 并反填成 64³ 布尔占据体。"""
         torch.manual_seed(seed)
         cc = pipe.sample_sparse_structure(cond, 64, 1, dict(P_INFER)).cpu().numpy()
         occ = np.zeros((64, 64, 64), bool)

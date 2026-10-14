@@ -4,16 +4,27 @@
 For each rendered yaw, rotate the mesh into the view-aligned canonical frame,
 then voxelize the rotated mesh.  Outputs are stored as compact npz coordinate
 lists under ss_view_voxels/<sha256>/<view>.npz.
+
+中文说明：
+- 用途：TRELLIS.1 风格的逐视角 64^3 占据体素生成（旧轴约定版本，未做 canon 修正）。
+- 输入：<root>/mesh_dumps/<obj>.pickle（归一化到 [-.5,.5] 的网格）+ renders_cond/<obj>/transforms.json 的 yaw。
+- 输出：<root>/<output_name>/<obj>/NNN.npz，键 'coords'（uint8 整数体素坐标），最多 24 个视角。
+- 关键约定：按 TRELLIS.1 的显示参考 R = R_cam @ R_display^T 旋转（行向量即 v @ rot_z(yaw-270)），
+  再对旋转后的网格体素化；有面数据才用三角网格体素化，否则退化为顶点栅格化。
+- 用法：python generate_ss_view_voxels.py --root <dir> [--resolution 64] [--output_name ...] [--overwrite]
 """
 import argparse, json, os, pickle
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import open3d as o3d
 
+# 绕 Z 轴的 3x3 float32 旋转矩阵（deg 为度）。
 def rot_z(deg):
     a = np.deg2rad(deg); c, s = np.cos(a), np.sin(a)
     return np.array([[c,-s,0],[s,c,0],[0,0,1]], dtype=np.float32)
 
+# 单对象任务：合并分部件顶点/面（面索引按累计顶点数偏移）→ 逐视角旋转并体素化存档；
+# 已存在且未 overwrite 的视角跳过。返回 (对象名, 完成视角数)。
 def process(job):
     root, obj, res, overwrite, output_name = job
     dump_path = os.path.join(root, 'mesh_dumps', obj + '.pickle')
@@ -62,6 +73,7 @@ def process(job):
         done+=1
     return obj,done
 
+# CLI 入口：--root 数据根、--resolution 网格边长、--workers 线程数、--output_name 输出目录名。
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument('--root',required=True); ap.add_argument('--resolution',type=int,default=64); ap.add_argument('--workers',type=int,default=16); ap.add_argument('--overwrite',action='store_true'); ap.add_argument('--output_name',default='ss_view_voxels_v2'); args=ap.parse_args()
     root=os.path.abspath(args.root); os.makedirs(os.path.join(root,args.output_name),exist_ok=True)

@@ -1,3 +1,12 @@
+"""在 Blender 内部把模型导出成 mesh dump（pickle）。
+
+- 用途：被 data_toolkit/dump_mesh.py 调用：加载模型 → 归一化到 [-0.5,0.5]³ → 导出分部件顶点/面。
+- 调用方式：blender -b -P dump_mesh.py -- --object model.glb --output_path /tmp/out.pickle。
+- 输出：pickle（{'objects': [{'vertices': float32 [N,3], 'faces': int32 [F,3]}, ...]}，已三角化，
+  顶点已乘 obj.matrix_world 到世界坐标）；脚本失败时由调用方约定写 *_error.txt。
+- 关键约定：几何取 evaluated depsgraph（含修改器/形态键结果）；只导出 MESH 类型对象；
+  .blend 输入走“删掉隐藏对象”路径而不重新导入；导入函数按 Blender 3.x/4.x 版本自动适配。
+"""
 import argparse, sys, os, math, io
 from typing import *
 import bpy
@@ -173,6 +182,7 @@ def normalize_scene() -> Tuple[float, Vector]:
     return scale, offset
 
 
+# 主流程：初始化场景（或复用 .blend）→ 归一化 → 逐对象取求值后网格、三角化并导出 pickle。
 def main(arg):    
     # Initialize context
     if arg.object.endswith(".blend"):
@@ -208,6 +218,7 @@ def main(arg):
         
         bm = bmesh.new()
         bm.from_mesh(eval_mesh)
+        # 先把网格顶点变换到世界坐标，再三角化，保证导出结果与场景朝向一致。
         bm.transform(obj.matrix_world)
         bmesh.ops.triangulate(bm, faces=bm.faces)
         bm.to_mesh(eval_mesh)
@@ -231,6 +242,7 @@ def main(arg):
     print('[INFO] Output saved to {}.'.format(arg.output_path))
 
         
+# 在 Blender 内运行：只解析 `--` 之后的参数（之前的属于 Blender 自身）。
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Renders given obj file by rotation a camera around it.')
     parser.add_argument('--object', type=str, help='Path to the 3D model file to be rendered.')

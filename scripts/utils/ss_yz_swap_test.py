@@ -7,6 +7,10 @@
 若后者显著更高，说明本地 GT 与 base/管线约定之间正好差一次 y/z 交换
 （即 HANDOFF §6.1-4 提到的那个 blender_dump ↔ dual_grid 的 y/z 对齐，
  但没有被应用到 SS 逐视角体素化脚本上）。
+
+CLI: [--n 8 抽样对象数]
+输出：stdout 的 IoU 对照表（原样 vs 交换 y/z，分别对 GT_view / GT_canon）。
+安全边界：只读权重与数据，不写任何文件；需 GPU（默认卡 6）。
 """
 import os
 import sys
@@ -34,6 +38,7 @@ P_INFER = dict(steps=12, guidance_strength=7.5, guidance_rescale=0.7,
 
 
 def main():
+    """抽样对象：预训练模型预测占据体，分别算"原样/交换 y/z"与本地两种 GT 的 IoU，判断训练目标是否差一次 y/z 交换。"""
     ap = argparse.ArgumentParser()
     ap.add_argument('--n', type=int, default=8)
     a = ap.parse_args()
@@ -46,6 +51,7 @@ def main():
     cm.image_size = 512
 
     def occ_lat(lat):
+        """把 GT latent 解码成 64³ 布尔占据体（>0 视为占据）。"""
         dec.cuda()
         return (dec(lat.to(wdt)) > 0)[0, 0].cpu().numpy()
 
@@ -61,6 +67,7 @@ def main():
     picks = [objs[i] for i in np.linspace(0, len(objs) - 1, a.n).astype(int)]
 
     def sample(cond, seed=42):
+        """固定种子采样 SS 并反填成 64³ 布尔占据体。"""
         torch.manual_seed(seed)
         cc = pipe.sample_sparse_structure(cond, 64, 1, dict(P_INFER)).cpu().numpy()
         occ = np.zeros((64, 64, 64), bool)
@@ -69,6 +76,7 @@ def main():
         return occ
 
     def iou(x, y):
+        """体素 IoU；并集为空时返回 0（用 max(1,...) 兜底）。"""
         i = (x & y).sum()
         return i / max(1, (x | y).sum())
 

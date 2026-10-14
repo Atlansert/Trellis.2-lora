@@ -4,6 +4,9 @@
 对同一张图只换随机种子重复采样：若长轴在同一张图内就随种子变化，说明输出朝向
 是欠定的（弱条件 / 没收敛），"翻转"本质是采样噪声；若同图内稳定、只在图与图之间
 变化，才是真正学到的"随输入切换坐标系"。
+
+运行：无参数（权重列表/种子 42..51/测试图 001..004 均为文件内常量）。
+安全边界：只读权重与 data_test/*.png，不写任何文件；需 GPU（默认卡 5）。
 """
 import os
 import sys
@@ -38,6 +41,8 @@ IMGS = ['001', '002', '003', '004']
 
 
 def main():
+    """对 5 组"权重×条件口径"组合，每张测试图换 10 个种子重复采样，
+    统计长轴分布：同图内就随种子变化 = 采样噪声（朝向欠定）。"""
     pipe = Trellis2ImageTo3DPipeline.from_pretrained('checkpoints')
     pipe.cuda()
     ss = pipe.models['sparse_structure_flow_model']
@@ -46,6 +51,7 @@ def main():
     imgs = {n: pipe.preprocess_image(raw[n]) for n in IMGS}
     c3 = {n: pipe.get_ss_cond([imgs[n]]) for n in IMGS}
 
+    # 先备好 DINOv3(管线默认) 条件，再临时换成 DINOv2@518 复刻旧口径，最后换回。
     m3 = pipe.ss_image_cond_model
     from trellis2.trainers.flow_matching.mixins.image_conditioned import (
         DinoV2LocalFeatureExtractor)
@@ -56,6 +62,7 @@ def main():
     pipe.ss_image_cond_model = m3
 
     def occ(cond, seed):
+        """按给定种子采样 SS 并反填成 64³ 布尔占据体。"""
         torch.manual_seed(seed)
         co = pipe.sample_sparse_structure(cond, 64, 1, dict(P)).cpu().numpy()
         o = np.zeros((64, 64, 64), bool)
@@ -64,6 +71,7 @@ def main():
         return o
 
     def ax(o):
+        """返回占据体最长跨度所在轴；空体返回 '-'。"""
         nz = np.argwhere(o)
         if not len(nz):
             return '-'

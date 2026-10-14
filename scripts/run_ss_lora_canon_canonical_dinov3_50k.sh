@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：Stage1（SS）LoRA 训练，目标是"修正后的规范帧(canonical)" latent + renders_cond_t 条件图，50k 步。
+# 用法：bash scripts/run_ss_lora_canon_canonical_dinov3_50k.sh [GPU 号，默认 5]（从原厂权重开始）。
+# 输出：results/multiview_1186_ss_flow_lora_64_views_canon_canonical/。
+# 边界：长跑 GPU 训练任务，持续写该输出目录；规范帧目标来自"最侧视那一帧"，全对象共享同一轴约定。
 # Stage1 SS LoRA —— **修正后的规范帧（canonical）目标**，50k 步（2026-10-11）。
 #
 # 为什么改用规范帧：实测原厂 base 在**端视**输入上也输出长度轴 = index1

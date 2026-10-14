@@ -1,3 +1,14 @@
+"""用 Blender 无头模式把原始资产导出成 mesh dump（pickle）。
+
+- 用途：数据重建流水线的网格准备步骤：对每个已下载资产调用 blender_script/dump_mesh.py，
+  把网格（分部件顶点/面）落成 <mesh_dump_root>/mesh_dumps/<sha256>.pickle。
+- 输入：--root（含 metadata.csv）、--download_root/raw/ 的本地资产、数据集适配模块（位置参数 1）。
+- 输出：mesh_dumps/<sha256>.pickle + mesh_dumps/new_records/part_<rank>.csv（增量进度）。
+- 关键约定：首次运行会在 /tmp 下载安装 Blender 4.5.1（BLENDER_PATH）；.blend 文件直接作为
+  工程参数传入，其余格式走 -P 脚本 + --object；只处理 local_path 非空且尚未 dump 的对象；
+  子进程输出被丢弃，失败信息从脚本写的 *_error.txt 里读取后抛错。
+- 用法：python dump_mesh.py <dataset_module> --root <dir> [--mesh_dump_root <dir>] [--max_workers N]
+"""
 import os
 import shutil
 import copy
@@ -16,6 +27,7 @@ BLENDER_LINK = 'https://ftp.halifax.rwth-aachen.de/blender/release/Blender4.5/bl
 BLENDER_INSTALLATION_PATH = '/tmp'
 BLENDER_PATH = f'{BLENDER_INSTALLATION_PATH}/blender-4.5.1-linux-x64/blender'
 
+# 若 /tmp 下没有 Blender（含运行库依赖）就下载安装；已有则直接复用。
 def _install_blender():
     if not os.path.exists(BLENDER_PATH):
         os.system('sudo apt-get update')
@@ -24,6 +36,8 @@ def _install_blender():
         os.system(f'tar -xvf {BLENDER_INSTALLATION_PATH}/blender-4.5.1-linux-x64.tar.xz -C {BLENDER_INSTALLATION_PATH}')
 
 
+# 单对象任务：在临时目录里跑 Blender 导出，成功后 move 到最终路径（临时目录自动清理）。
+# 成功返回 {sha256, mesh_dumped: True}，失败抛 ValueError（附 Blender 写的错误信息）。
 def _dump_mesh(file_path, metadatum, root):
     sha256 = metadatum['sha256']
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -51,6 +65,7 @@ def _dump_mesh(file_path, metadatum, root):
             else:
                 raise ValueError(f'Failed to dump mesh. File {file_path}.')
 
+# CLI 入口：以 datasets.<sys.argv[1]> 为数据集适配模块，foreach_instance 负责并发与本地文件解析。
 if __name__ == '__main__':
     dataset_utils = importlib.import_module(f'datasets.{sys.argv[1]}')
 
@@ -111,6 +126,7 @@ if __name__ == '__main__':
     records = []
 
     # filter out objects that are already processed
+    # 中文：按已存在的 .pickle 反推已处理对象并从待处理列表中剔除（可中断续跑）。
     sha256_list = os.listdir(os.path.join(opt.mesh_dump_root, 'mesh_dumps'))
     sha256_list = [os.path.splitext(f)[0] for f in sha256_list if f.endswith('.pickle')]
     for sha256 in sha256_list:
@@ -124,4 +140,5 @@ if __name__ == '__main__':
     func = partial(_dump_mesh, root=opt.mesh_dump_root)
     mesh_dumped = dataset_utils.foreach_instance(metadata, opt.download_root, func, max_workers=opt.max_workers, desc='Dumping mesh')
     mesh_dumped = pd.concat([mesh_dumped, pd.DataFrame.from_records(records)])
+    # 每个 rank 写自己的进度分片。
     mesh_dumped.to_csv(os.path.join(opt.mesh_dump_root, 'mesh_dumps', 'new_records', f'part_{opt.rank}.csv'), index=False)

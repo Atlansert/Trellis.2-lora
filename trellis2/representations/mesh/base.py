@@ -1,3 +1,11 @@
+"""网格表示与材质：Mesh 及其带 PBR 材质 / 带体素属性的变体。
+
+- Mesh: vertices (V,3) float、faces (F,3) int、可选 vertex_attrs (V,C)；
+  fill_holes / remove_faces / simplify 都通过 cumesh 在原地重建网格（这些操作需要 CUDA）。
+- MeshWithPbrMaterial: 增加 material_ids [M]、uv_coords [M,3,2] 与 PbrMaterial 列表，
+  layout 描述每顶点属性 6 通道的切片含义（base_color/metallic/roughness/alpha）。
+- MeshWithVoxel: 同时是 Mesh 和 Voxel，可用 query_attrs 对任意 xyz 三线性采样体素属性。
+"""
 from typing import *
 import torch
 from ..voxel import Voxel
@@ -6,6 +14,7 @@ from flex_gemm.ops.grid_sample import grid_sample_3d
 
 
 class Mesh:
+    """三角网格：顶点 (V,3)、面 (F,3)，可选顶点属性 (V,C)。"""
     def __init__(self,
         vertices,
         faces,
@@ -33,6 +42,7 @@ class Mesh:
         return self.to('cpu')
     
     def fill_holes(self, max_hole_perimeter=3e-2):
+        # 用 cumesh 找出边界环并补洞；没有边界就直接返回（原地修改）
         vertices = self.vertices.cuda()
         faces = self.faces.cuda()
         
@@ -57,6 +67,7 @@ class Mesh:
         self.faces = new_faces.to(self.device)
         
     def remove_faces(self, face_mask: torch.Tensor):
+        # face_mask: 长度为 F 的布尔掩码，True 表示删除该面
         vertices = self.vertices.cuda()
         faces = self.faces.cuda()
         
@@ -69,6 +80,7 @@ class Mesh:
         self.faces = new_faces.to(self.device)
         
     def simplify(self, target=1000000, verbose: bool=False, options: dict={}):
+        # 简化到目标面数 target（原地替换 vertices/faces）
         vertices = self.vertices.cuda()
         faces = self.faces.cuda()
         
@@ -82,23 +94,27 @@ class Mesh:
 
 
 class TextureFilterMode:
+    """纹理采样过滤模式，取值与 glTF 一致。"""
     CLOSEST = 0
     LINEAR = 1
 
 
 class TextureWrapMode:
+    """纹理环绕模式，取值与 glTF 一致。"""
     CLAMP_TO_EDGE = 0
     REPEAT = 1
     MIRRORED_REPEAT = 2
 
 
 class AlphaMode:
+    """透明度模式：不透明 / 按 cutoff 掩码 / 混合。"""
     OPAQUE = 0
     MASK = 1
     BLEND = 2
 
 
 class Texture:
+    """纹理贴图：image 为张量图像，附带过滤/环绕模式。"""
     def __init__(
         self,
         image: torch.Tensor,
@@ -118,6 +134,7 @@ class Texture:
 
 
 class PbrMaterial:
+    """PBR 材质：可选的 base_color/metallic/roughness/alpha 贴图 + 对应标量因子。"""
     def __init__(
         self,
         base_color_texture: Optional[Texture] = None,
@@ -158,6 +175,7 @@ class PbrMaterial:
 
 
 class MeshWithPbrMaterial(Mesh):
+    """带 PBR 材质的网格：每顶点属性按 layout 解释，uv_coords 为每个面的三角形 UV。"""
     def __init__(self,
         vertices,
         faces,
@@ -188,6 +206,7 @@ class MeshWithPbrMaterial(Mesh):
 
 
 class MeshWithVoxel(Mesh, Voxel):
+    """同时携带网格与体素属性的表示（体素属性可插值到顶点上用于纹理/外观）。"""
     def __init__(self,
         vertices: torch.Tensor,
         faces: torch.Tensor,
@@ -220,9 +239,11 @@ class MeshWithVoxel(Mesh, Voxel):
         )
         
     def query_attrs(self, xyz):
+        # 把世界坐标 xyz 换算到体素网格索引，再对 attrs 做三线性插值
         grid = ((xyz - self.origin) / self.voxel_size).reshape(1, -1, 3)
         vertex_attrs = grid_sample_3d(
             self.attrs,
+            # 给体素坐标前面补一列 batch 索引 0，凑成 (N, 4) 的 (b, x, y, z)
             torch.cat([torch.zeros_like(self.coords[..., :1]), self.coords], dim=-1),
             self.voxel_shape,
             grid,

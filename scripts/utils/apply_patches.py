@@ -9,6 +9,11 @@
 用法:
     python scripts/apply_patches.py
     python scripts/apply_patches.py --reverse   # 撤销补丁
+
+CLI: [--reverse]（脚本会先 chdir 到项目根，所有路径都是相对项目根）
+安全边界（重要）：会**原地修改** trellis2/ 下的源文件（image_conditioned.py、image_feature_extractor.py、
+  sparse_flow_matching.py、shape_vae.py），并先删除项目内所有 __pycache__；--reverse 逐段还原。
+  补丁靠字符串精确匹配替换，匹配不到只警告并跳过，不会强行改坏文件。
 """
 import os
 import sys
@@ -193,6 +198,7 @@ def clean_pycache():
 
 
 def main():
+    """先清 __pycache__，再依次应用/撤销三个补丁（DINOv3 layer 路径、SparseTensor 空切片、Shape VAE snapshot）。"""
     parser = argparse.ArgumentParser(description='TRELLIS.2 微调代码补丁')
     parser.add_argument('--reverse', action='store_true', help='撤销所有补丁')
     args = parser.parse_args()
@@ -205,6 +211,7 @@ def main():
     print(f'  {action}')
     print(f'{"=" * 60}')
 
+    # 先清 __pycache__：避免旧的 .pyc 让补丁效果看起来没生效。
     clean_pycache()
     patch_dinov3_layer(reverse=args.reverse)
     patch_sparse_slice(reverse=args.reverse)

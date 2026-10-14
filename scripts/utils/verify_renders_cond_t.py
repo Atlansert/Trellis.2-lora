@@ -2,6 +2,10 @@
 """验证 renders_cond_t：训练侧条件图 vs 推理侧条件图（**同一张图**逐像素比较）。
 
 注意：不能用 dataset[i]（它会随机抽视角），必须直接调 _image(同一个文件)。
+
+CLI: [--n 10 抽多少个不透明对象] [--view 0 视角下标]
+输出：stdout 对照表（旧/新条件图非零占比、"训练 vs 推理"的 |Δ| 与相关性）。
+安全边界：只读两份数据目录与管线预处理，不写文件；不需要 GPU（用 CPU 替身对象）。
 """
 import os
 import sys
@@ -23,6 +27,7 @@ RT = 'training_data/multiview_1186/renders_cond_t'
 
 
 class Dummy:
+    """给 preprocess_image 用的最小替身对象（只需 low_vram / _device 两个属性）。"""
     low_vram = False
     _device = 'cpu'
 
@@ -34,6 +39,7 @@ ROOTS = lambda rc: json.dumps({'train_data': {
 
 
 def infer_cond(path, size=512):
+    """复刻推理侧条件图预处理：管线 preprocess_image -> 缩放 -> 归一化到 [0,1] 的 CHW 张量。"""
     img = Image.open(path).convert('RGBA')
     out = Trellis2ImageTo3DPipeline.preprocess_image(Dummy(), img)
     out = out.resize((size, size), Image.Resampling.LANCZOS)
@@ -41,6 +47,9 @@ def infer_cond(path, size=512):
 
 
 def main():
+    """分别用 renders_cond 与 renders_cond_t 构数据集，抽若干对象在同一文件上比较
+    训练侧 _image 与推理侧预处理结果（应几乎一致、且背景已被 alpha 消掉）。
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument('--n', type=int, default=10)
     ap.add_argument('--view', type=int, default=0)

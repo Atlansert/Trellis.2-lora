@@ -11,6 +11,10 @@
   4. alpha = mask*255，RGB 原样保留（训练/推理侧会 x*alpha 把背景变黑）
 
 --test 模式只体检若干对象，不写文件。
+
+CLI: [--test N 只体检] [--tol 3.0 背景色差阈值] [--apply] [--out renders_cond_t] [--limit N]
+输出：默认模式把补好 alpha 的 RGBA 图与 transforms.json 写到 <ROOT>/<out>/<sha>/（会新建/覆盖）。
+安全边界：--test 只打印，不写文件；默认模式只写输出目录，renders_cond 原图只读；只处理"不透明"对象。
 """
 import os
 import sys
@@ -27,6 +31,7 @@ CH = ' .:-=+*#%@'
 
 
 def border_bg(arr):
+    """取图像四边窄条的中位色作为背景估计，并给出环内标准差最大值（背景是否均匀）。"""
     h, w = arr.shape[:2]
     k = max(2, min(h, w) // 64)
     ring = np.concatenate([
@@ -36,6 +41,9 @@ def border_bg(arr):
 
 
 def derive_mask(rgb, tol):
+    """由 RGB 推前景掩膜：与背景色差 > tol → 闭运算 → 只留最大连通域 → 填洞。
+    返回 (原掩膜, 填洞后掩膜, 背景色, 背景std, 色差图)。
+    """
     bg, bgstd = border_bg(rgb)
     diff = np.abs(rgb - bg).max(axis=2)
     m = diff > tol
@@ -52,6 +60,7 @@ def derive_mask(rgb, tol):
 
 
 def show(m, cols=72, rows=18):
+    """把布尔掩膜降采样成 ASCII 预览（便于在无图环境核对形状）。"""
     small = np.array(Image.fromarray((m * 255).astype(np.uint8))
                      .resize((cols, rows), Image.BOX)).astype(np.float32) / 255
     for r in range(rows):
@@ -59,6 +68,7 @@ def show(m, cols=72, rows=18):
 
 
 def opaque_rows():
+    """从 metadata.csv 挑出"不透明"对象（首帧 alpha 覆盖率 ≥0.99）的元数据行。"""
     rows = list(csv.DictReader(open(os.path.join(ROOT, 'metadata.csv'))))
     out = []
     for r in rows:
@@ -71,6 +81,7 @@ def opaque_rows():
 
 
 def main():
+    """--test 时打印若干对象的掩膜体检表；默认模式逐对象逐帧补 alpha 并写出新目录。"""
     ap = argparse.ArgumentParser()
     ap.add_argument('--test', type=int, default=0, help='只体检 N 个对象')
     ap.add_argument('--tol', type=float, default=3.0, help='背景差异阈值（0-255）')

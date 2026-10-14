@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：Stage1 SS LoRA 400000 + Stage2 保持预训练（不挂 shape LoRA）推理，输入 data_test_sel（001/003/005_side），固定 GPU 5。
+# 用法：bash scripts/inference_history/infer_stage1_0400000_stage2_pretrained_3imgs.sh（无参数）。
+# 输出：results_infer/data_test_stage1_lora_0400000_stage2_pretrained_1024/（GLB、run.log、infer.log）。
+# 边界：会 mkdir 输出目录并跑 GPU 推理（--no_video）；跑完 GLB 数不足则退出码 3。
 # Inference: Stage1 SS LoRA (step 400000) + Stage2 pretrained (no LoRA)
 # on selected data_test images (001, 003, 005_side), GPU 5.
 # Output: results_infer/data_test_stage1_lora_0400000_stage2_pretrained_1024/

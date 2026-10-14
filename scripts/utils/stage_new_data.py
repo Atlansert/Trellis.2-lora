@@ -10,6 +10,11 @@ new_data 各交付包的结构约定：
     new_data_staged/<stem>/
         mesh_textured_pbr.glb     GLB 模型（统一命名，沿用 data_for_train 约定）
         source.json               来源溯源信息
+
+CLI: [--root /data/lzx/TRELLIS.2] [--staged new_data_staged] [--move（移动而非复制）]
+输出：<root>/<staged>/<stem>/{mesh_textured_pbr.glb,source.json} 以及暂存区根目录的 _manifest.csv 清单。
+安全边界：只读 new_data 下 PKGS 指定的交付包；--move 会把源文件从 new_data 移走（默认只复制）；
+          不改 data_for_train，重复暂存同尺寸文件会跳过。
 """
 import os
 import re
@@ -28,6 +33,7 @@ PKGS_REJECT_ONLY = ['CAPTAIN_3D Data_Modification_Package08_201-300（Jiang）']
 
 
 def sha256_file(path, nbytes=1 << 20):
+    """分块计算文件 sha256（1MB 一块）。"""
     h = hashlib.sha256()
     with open(path, 'rb') as f:
         for chunk in iter(lambda: f.read(nbytes), b''):
@@ -36,6 +42,7 @@ def sha256_file(path, nbytes=1 << 20):
 
 
 def main():
+    """把各交付包 PLB/bip 目录下的 GLB 统一命名复制/移动到暂存区，写 source.json 溯源与 _manifest.csv 清单。"""
     ap = argparse.ArgumentParser()
     ap.add_argument('--root', default='/data/lzx/TRELLIS.2')
     ap.add_argument('--staged', default='new_data_staged')

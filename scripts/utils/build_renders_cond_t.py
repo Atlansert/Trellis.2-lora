@@ -8,6 +8,10 @@
 
 输出结构（与 renders_cond 同构，可直接替换数据集的 render_cond）：
     renders_cond_t/<sha>/000_cam_000.png ... 023_cam_345.png  + real_*.png + transforms.json
+
+CLI: [--out renders_cond_t] [--workers 16] [--limit N(调试用，只处理前 N 个不透明对象)]
+安全边界：输出只写 training_data/multiview_1186/<out>/（已有文件会被覆盖、透明对象建符号链接），
+          renders_cond 原图只读不改；需可写该数据目录。
 """
 import os
 import sys
@@ -26,6 +30,7 @@ TOL = 3.0
 
 
 def border_bg(arr):
+    """取图像四边窄条像素的中位数作为背景色估计。"""
     h, w = arr.shape[:2]
     k = max(2, min(h, w) // 64)
     ring = np.concatenate([arr[:k].reshape(-1, 3), arr[-k:].reshape(-1, 3),
@@ -34,6 +39,7 @@ def border_bg(arr):
 
 
 def derive_mask(rgb):
+    """由 RGB 推出前景掩膜：与背景色差 > TOL，再闭运算、只保留最大连通域、填洞，得到完整 alpha。"""
     bg = border_bg(rgb)
     m = np.abs(rgb - bg).max(axis=2) > TOL
     m = ndimage.binary_closing(m, structure=np.ones((5, 5)), iterations=1)
@@ -45,6 +51,9 @@ def derive_mask(rgb):
 
 
 def do_object(job):
+    """处理单个对象目录（子进程任务）：渲染帧补 alpha 写出 RGBA，真实照片帧原样拷贝，并复制 transforms.json。
+    返回 (sha, 渲染帧数, 真实帧数)。
+    """
     sha, outroot = job
     src = os.path.join(ROOT, 'renders_cond', sha)
     dst = os.path.join(outroot, sha)
@@ -57,6 +66,7 @@ def do_object(job):
             continue
         dp = os.path.join(dst, f['file_path'])
         if 'yaw_deg' in f:
+            # 带 yaw_deg 的是渲染帧（需补 alpha）；否则是真实照片帧，原样拷贝。
             arr = np.array(Image.open(sp).convert('RGB')).astype(np.float32)
             m = derive_mask(arr)
             n_hole += int(m.sum())
@@ -72,6 +82,7 @@ def do_object(job):
 
 
 def classify():
+    """按首帧 alpha 覆盖率把对象分为"不透明需补 alpha"(≥0.99) 与"本来就透明可符号链接"两组。"""
     rows = list(csv.DictReader(open(os.path.join(ROOT, 'metadata.csv'))))
     opaque, transp = [], []
     for r in rows:
@@ -84,6 +95,7 @@ def classify():
 
 
 def main():
+    """分类 -> 多进程给不透明对象补 alpha -> 为透明对象建符号链接；返回 0。"""
     ap = argparse.ArgumentParser()
     ap.add_argument('--out', default='renders_cond_t')
     ap.add_argument('--workers', type=int, default=16)

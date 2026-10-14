@@ -1,3 +1,11 @@
+"""稀疏结构（Sparse Structure, SS）VAE 训练器。
+
+职责：训练 SS VAE——encoder 把二值稀疏结构体素（[N x 1 x H x W x D]）编码为潜变量，
+decoder 重建占用 logits；损失为重建项（bce/l1/dice 可选）+ KL 正则。
+输入：batch 里的 ss（二值占用张量）；输出：terms（loss 及各项分项）与快照可视化。
+契约：encoder 需返回 (z, mean, logvar) 以支持重参数化采样与 KL；快照走确定性编码（sample_posterior=False）。
+"""
+
 from typing import *
 import copy
 import torch
@@ -11,6 +19,8 @@ from ..basic import BasicTrainer
 class SparseStructureVaeTrainer(BasicTrainer):
     """
     Trainer for Sparse Structure VAE.
+    
+    稀疏结构 VAE 训练器：重建占用场 + KL 正则，用重建 loss 种类与 lambda_kl 控制权重。
     
     Args:
         models (dict[str, nn.Module]): Models to train.
@@ -70,10 +80,12 @@ class SparseStructureVaeTrainer(BasicTrainer):
             a dict with the key "loss" containing a scalar tensor.
             may also contain other keys for different terms.
         """
+        # 编码：sample_posterior=True 走重参数化采样；return_raw=True 同时拿到 mean/logvar 用于 KL
         z, mean, logvar = self.training_models['encoder'](ss.float(), sample_posterior=True, return_raw=True)
         logits = self.training_models['decoder'](z)
 
         terms = edict(loss = 0.0)
+        # 重建项：三选一（bce 用 logits，l1/dice 先过 sigmoid）
         if self.loss_type == 'bce':
             terms["bce"] = F.binary_cross_entropy_with_logits(logits, ss.float(), reduction='mean')
             terms["loss"] = terms["loss"] + terms["bce"]
@@ -86,7 +98,8 @@ class SparseStructureVaeTrainer(BasicTrainer):
             terms["loss"] = terms["loss"] + terms["dice"]
         else:
             raise ValueError(f'Invalid loss type {self.loss_type}')
-        terms["kl"] = 0.5 * torch.mean(mean.pow(2) + logvar.exp() - logvar - 1)
+        terms["kl"] = 0.5 * torch.mean(mean.pow(2) + logvar.exp() - logvar - 1)   # 标准高斯 KL
+        # 注意：这里读的是 self.lamda_kl，而 __init__ 保存的是 self.lambda_kl（名字不一致，疑似原有笔误）
         terms["loss"] = terms["loss"] + self.lamda_kl * terms["kl"]
             
         return terms, {}
@@ -102,6 +115,7 @@ class SparseStructureVaeTrainer(BasicTrainer):
         batch_size: int,
         verbose: bool = False,
     ) -> Dict:
+        # 快照：对数据集的深拷贝采样一批，做确定性编码-解码（不做后验采样）
         dataloader = DataLoader(
             copy.deepcopy(self.dataset),
             batch_size=batch_size,
@@ -111,6 +125,7 @@ class SparseStructureVaeTrainer(BasicTrainer):
         )
 
         # inference
+        # 取后验均值编码（sample_posterior=False），logits>0 即占用，可视化时与 GT 并排比较
         gts = []
         recons = []
         for i in range(0, num_samples, batch_size):

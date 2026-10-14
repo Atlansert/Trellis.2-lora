@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：data_test 全量推理：Stage1 SS LoRA 32000 + Stage2 shape LoRA 70000，1024 管线，固定 GPU 6。
+# 用法：bash scripts/inference_history/infer_stage1_032000_stage2_070000_gpu6.sh（无参数）。
+# 输出：results_infer/data_test_stage1_lora_032000_stage2_lora_0070000/（GLB、run.log、infer.log）；已有等量 GLB 则跳过。
+# 边界：会 mkdir 输出目录并跑 GPU 推理（--no_video）；跑完 GLB 数不足则退出码 3。
 # Stage1 32000 + Stage2 shape-flow LoRA 70000 on data_test (4 imgs), GPU 6.
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"

@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：Stage1（SS）LoRA 训练，规范帧目标 + 只保留"长轴偏离正侧视 ≤10°"的视角，20k 步、每 2k 存一次。
+# 用法：bash scripts/run_ss_lora_canon_axis10_dinov3_20k.sh [GPU 号，默认 4]；从原厂权重重训，不续任何已有 LoRA。
+# 输出：results/multiview_1186_ss_flow_lora_64_canon_axis10/。
+# 边界：长跑 GPU 训练任务，持续写该输出目录；只读 training_data/ 与 configs/。
 # 规范帧目标 + 只保留目标长轴偏离正侧视轴 <= 10° 的视角。
 # 宽高比 >= 3.5 仍包含 30°/45° 斜侧视，那些图和正侧视几乎一样，
 # 目标朝向却差几十度，view-side 在 12k 把车身抹成圆管、14k 翻轴。

@@ -1,3 +1,12 @@
+"""稀疏体素 PBR 数据集：提供材质属性体素（以及可选的带贴图 GT 网格）。
+
+职责：从 pbr_dump 的 pickle 还原带 PBR 材质的网格（贴图/材质参数/UV），从 pbr_voxel 的
+vxz 读活跃体素的属性（base_color/metallic/roughness/emissive/alpha），属性拼成 feats。
+输入：roots（含 pbr_dump 与 pbr_voxel 子目录）；输出：{'x': 属性稀疏张量} 或再加上 'mesh'。
+契约：feats 用 [-1,1] 归一化（读入时由 [0,255] 线性映射而来），layout 切片定义属性语义；
+with_mesh 控制是否附带 GT 网格（渲染监督需要）；collate_fn 按属性体素数均衡分组。
+"""
+
 import os
 import io
 from typing import Union
@@ -17,10 +26,12 @@ from ..utils.data_utils import load_balanced_group_indices
 
 
 def is_power_of_two(n: int) -> bool:
+    """判断 n 是否为 2 的幂（贴图尺寸要求）。"""
     return n > 0 and (n & (n - 1)) == 0
 
 
 def nearest_power_of_two(n: int) -> int:
+    """返回离 n 最近的 2 的幂（距离相同时取较大者）。"""
     if n < 1:
         raise ValueError("n must be >= 1")
     if is_power_of_two(n):
@@ -34,8 +45,11 @@ def nearest_power_of_two(n: int) -> int:
     
 
 class SparseVoxelPbrVisMixin:
+    """PBR 体素可视化 mixin：把每种属性单独当作颜色渲染 4 视角，便于逐属性排查。"""
+
     @torch.no_grad()
     def visualize_sample(self, x: Union[sp.SparseTensor, dict]):
+        """按 layout 里每个属性分别渲染 4 视角图，返回 {属性名: [N,3,H,W]}。"""
         x = x if isinstance(x, sp.SparseTensor) else x['x']
         
         renderer = VoxelRenderer()
@@ -64,7 +78,7 @@ class SparseVoxelPbrVisMixin:
 
         images = {k: [] for k in self.layout}
         
-        # Build each representation
+        # 每种属性单独出一张 2x2 拼图；属性通道数不足 3 时用 expand 复制成 3 通道当伪彩色
         x = x.cuda()
         for i in range(x.shape[0]):
             rep = Voxel(
@@ -95,6 +109,8 @@ class SparseVoxelPbrDataset(SparseVoxelPbrVisMixin, StandardDatasetBase):
     """
     Sparse Voxel PBR dataset.
     
+    稀疏体素 PBR 数据集：属性体素（可选附带带贴图 GT 网格），feats 位于 [-1,1]。
+    
     Args:
         roots (str): path to the dataset
         resolution (int): resolution of the voxel grid
@@ -116,7 +132,8 @@ class SparseVoxelPbrDataset(SparseVoxelPbrVisMixin, StandardDatasetBase):
         self.max_active_voxels = max_active_voxels
         self.max_num_faces = max_num_faces
         self.with_mesh = with_mesh
-        self.value_range = (-1, 1)
+        self.value_range = (-1, 1)   # 属性 feats 的取值范围（可视化时用）
+        # 各属性通道数 -> layout 给出它们在 feats 里的切片
         self.channels = {
             'base_color': 3,
             'metallic': 1,
@@ -143,6 +160,7 @@ class SparseVoxelPbrDataset(SparseVoxelPbrVisMixin, StandardDatasetBase):
         return '\n'.join(lines)
         
     def filter_metadata(self, metadata):
+        # 过滤：已做 PBR 体素化 -> 美学分达标（可选）-> 体素数上限 -> 面数上限（可选）
         stats = {}
         metadata = metadata[metadata['pbr_voxelized'] == True]
         stats['PBR Voxelized'] = len(metadata)
@@ -158,6 +176,7 @@ class SparseVoxelPbrDataset(SparseVoxelPbrVisMixin, StandardDatasetBase):
 
     @staticmethod
     def _texture_from_dump(pack) -> Texture:
+        """把 dump 里的贴图字节解码成 Texture：非正方形/非 2 次幂时缩放到最近 2 次幂并映射插值/包裹模式。"""
         png_bytes = pack['image']
         image = Image.open(io.BytesIO(png_bytes))
         if image.width != image.height or not is_power_of_two(image.width):
@@ -182,7 +201,7 @@ class SparseVoxelPbrDataset(SparseVoxelPbrVisMixin, StandardDatasetBase):
         with open(os.path.join(root, f'{instance}.pickle'), 'rb') as f:
             dump = pickle.load(f)
             
-        # Fix dump alpha map
+        # 兼容修正：有 alpha 贴图却标成 OPAQUE 的材质，改为 BLEND，否则 alpha 不生效
         for mat in dump['materials']:
             if mat['alphaTexture'] is not None and mat['alphaMode'] == 'OPAQUE':
                 mat['alphaMode'] = 'BLEND'
@@ -237,6 +256,7 @@ class SparseVoxelPbrDataset(SparseVoxelPbrVisMixin, StandardDatasetBase):
         uv_coords = torch.from_numpy(np.concatenate(uv_coords, axis=0)).float()
         
         # Normalize vertices
+        # 居中并缩放到 [-0.5, 0.5]（与 dual grid 网格保持同一坐标约定）
         vertices_min = vertices.min(dim=0)[0]
         vertices_max = vertices.max(dim=0)[0]
         center = (vertices_min + vertices_max) / 2
@@ -253,6 +273,7 @@ class SparseVoxelPbrDataset(SparseVoxelPbrVisMixin, StandardDatasetBase):
         )]}
 
     def read_pbr_voxel(self, root, instance):
+        # 读 vxz 属性并按 layout 顺序拼成 feats；[0,255] -> [-1,1]；coords 前补 batch 维 0
         coords, attr = o_voxel.io.read_vxz(os.path.join(root, f'{instance}.vxz'), num_threads=4)
         feats = torch.concat([attr[k] for k in self.layout], dim=-1) / 255.0 * 2 - 1
         x = sp.SparseTensor(
@@ -271,6 +292,7 @@ class SparseVoxelPbrDataset(SparseVoxelPbrVisMixin, StandardDatasetBase):
     
     @staticmethod
     def collate_fn(batch, split_size=None):
+        """按属性体素数均衡分组拼批：Tensor stack、SparseTensor sparse_cat、list 展平。"""
         if split_size is None:
             group_idx = [list(range(len(batch)))]
         else:

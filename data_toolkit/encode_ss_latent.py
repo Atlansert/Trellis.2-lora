@@ -1,3 +1,15 @@
+"""把 shape latent 里的稀疏体素坐标编码成 SS（稀疏结构）latent。
+
+- 用途：本项目数据重建流水线的一步：读 shape_latents/<name>/<sha256>.npz 的 coords，
+  栅格化成 64^3 占据网格，用 SS 编码器（TRELLIS.1 的 ss_enc_conv3d_16l8_fp16）编码。
+- 输入：--root（含 metadata.csv）、--shape_latent_name（shape latent 目录名）、
+  --enc_pretrained 或 --enc_model/--ckpt/--model_root（自训练编码器）。
+- 输出：<ss_latent_root>/ss_latents/<latent_name>/<sha256>.npz，键 'z'；
+  进度记录写在 new_records/part_<rank>.csv，并据此跳过已处理对象。
+- 关键约定：只处理 metadata 中 shape_latent_encoded=True 的对象；支持 --rank/--world_size 分片
+  与多线程加载/落盘；latent 非有限值直接跳过（不写坏数据）。
+- 用法：python encode_ss_latent.py --root <dir> --shape_latent_name <name> [--filter_low_aesthetic_score 4.5]
+"""
 import os
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
@@ -15,9 +27,11 @@ import trellis2.models as models
 
 torch.set_grad_enabled(False)
 
+# 稀疏张量健全性检查：特征与坐标都必须是有限值。
 def is_valid_sparse_tensor(tensor):
     return torch.isfinite(tensor.feats).all() and torch.isfinite(tensor.coords).all()
 
+# CUDA 出错后同步并清空缓存，避免后续对象继续失败。
 def clear_cuda_error():
     torch.cuda.synchronize()
     torch.cuda.empty_cache()
@@ -54,6 +68,7 @@ if __name__ == '__main__':
     opt.ss_latent_root = opt.ss_latent_root or opt.root
 
     if opt.enc_model is None:
+        # 用预训练编码器：latent 目录名由模型名+分辨率决定，保证不同编码器结果不混写。
         latent_name = f'{opt.enc_pretrained.split("/")[-1]}_{opt.resolution}'
         encoder = models.from_pretrained(opt.enc_pretrained).eval().cuda()
     else:
@@ -81,6 +96,8 @@ if __name__ == '__main__':
     # Some locally prepared datasets predate the generic shape_latent_encoded
     # marker and expose only the resolution-specific conversion marker.  The
     # shape latent files are the authoritative input for SS encoding here.
+    # 中文：更早的本地数据集没有通用标记，只有分辨率相关的转换标记；
+    # 因此以 shape latent 文件是否实际存在作为最终依据。
     if 'shape_latent_encoded' not in metadata.columns:
         if 'dual_grid_converted_1024' in metadata.columns:
             metadata['shape_latent_encoded'] = metadata['dual_grid_converted_1024'].fillna(False)
@@ -110,6 +127,7 @@ if __name__ == '__main__':
     records = []
     
     # filter out objects that are already processed
+    # 中文：按 rank/world_size 切分任务；再从已产出的 npz 反推已处理对象并剔除，实现可中断续跑。
     sha256_list = os.listdir(os.path.join(opt.ss_latent_root, 'ss_latents'))
     sha256_list = [os.path.splitext(f)[0] for f in sha256_list if f.endswith('.npz')]
     for sha256 in sha256_list:
@@ -125,6 +143,7 @@ if __name__ == '__main__':
          ThreadPoolExecutor(max_workers=32) as saver_executor:
 
         def loader(sha256):
+            # 加载线程：读 shape latent 的体素坐标并栅格化成 64^3 占据网格，放入有界队列。
             try:
                 coords = np.load(os.path.join(opt.shape_latent_root, 'shape_latents', opt.shape_latent_name, f'{sha256}.npz'))['coords']
                 assert np.all(coords < opt.resolution), f"{sha256}: Invalid coords"
@@ -139,6 +158,7 @@ if __name__ == '__main__':
         loader_executor.map(loader, sha256s)
         
         def saver(sha256, pack):
+            # 落盘线程：把 latent 写成 npz 并追加一条进度记录（供下次续跑跳过）。
             save_path = os.path.join(opt.ss_latent_root, 'ss_latents', latent_name, f'{sha256}.npz')
             np.savez_compressed(save_path, **pack)
             records.append({'sha256': sha256, 'ss_latent_encoded': True})
@@ -151,6 +171,7 @@ if __name__ == '__main__':
                     continue
                 
                 ss = ss.cuda()[None].float()
+                # sample_posterior=False：取确定性编码（均值），便于数据重建的可重复性。
                 z = encoder(ss, sample_posterior=False)
                 torch.cuda.synchronize()
 
@@ -172,4 +193,5 @@ if __name__ == '__main__':
         saver_executor.shutdown(wait=True)
         
     records = pd.DataFrame.from_records(records)
+    # 每个 rank 写自己的进度分片，避免多进程写同一文件。
     records.to_csv(os.path.join(opt.ss_latent_root, 'ss_latents', latent_name, 'new_records', f'part_{opt.rank}.csv'), index=False)

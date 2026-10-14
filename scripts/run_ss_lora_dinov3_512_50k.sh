@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：Stage1（SS）LoRA 训练，条件改成 DINOv3@512 + crop_scale 1.0（与推理口径一致），50k 步。
+# 用法：bash scripts/run_ss_lora_dinov3_512_50k.sh [GPU 号，默认 4]。
+# 输出：results/multiview_1186_ss_flow_lora_64_views_dinov3_512/。
+# 边界：长跑 GPU 训练任务，持续写该输出目录；主要是修旧 run 的"DINOv2 训练 / DINOv3 推理"条件错配。
 # Stage 1 (sparse structure) LoRA —— DINOv3@512 条件 + 与推理对齐的裁剪，50k 步。
 #
 # 相对旧 run（multiview_1186_ss_flow_lora_64_views）的差异：

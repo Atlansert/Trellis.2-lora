@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：在 side/005_side.png 上扫描 SS LoRA 各步数（1k..12k，每 1k 一档），1024 管线、其余权重保持预训练。
+# 用法：bash scripts/inference_history/infer_ss_lora_steps.sh（无参数；路径写死 /data/lzx/TRELLIS.2，GPU 固定 7）。
+# 输出：results_infer/side_ss_lora_steps/step<NNNN>/{005_side.glb,infer.log}；已有该 glb 的档位自动跳过。
+# 边界：会 mkdir 输出目录并跑 GPU 推理；只读权重，不训练。
 set -u
 ROOT="/data/lzx/TRELLIS.2"
 CKPT_DIR="$ROOT/results/multiview_1186_ss_flow_lora_64/ckpts"

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""最终交付表：任务 4 扫描（A 组）与 yz 修正组的朝向 + 几何指标。"""
+"""最终交付表：任务 4 扫描（A 组）与 yz 修正组的朝向 + 几何指标。
+
+运行：无参数，需在项目根目录执行（内部以 cwd=/data/lzx/TRELLIS.2 调 mesh_metrics.py 子进程）。
+输出：stdout 交付表；只读 GLB（不写文件、不改数据），指标复用 mesh_metrics 的口径。
+"""
 import os
 import re
 import glob
@@ -9,6 +13,7 @@ import trimesh
 
 
 def metrics(p):
+    """调 mesh_metrics.py 子进程取该 GLB 的 (尖边占比, 夹角均值, 夹角p95)；解析失败返回三个 None。"""
     import subprocess
     out = subprocess.run(
         ['/home/test/miniconda3/envs/trellis2/bin/python',
@@ -18,6 +23,7 @@ def metrics(p):
         if '.glb' in ln and '完成' not in ln and '实验' not in ln:
             f = ln.split()
             # 文件 顶点 面 尖边占比 夹角均值 夹角p95 边界边占比 分量 封闭
+            # 取输出行末三列：-6 尖边占比, -5 夹角均值, -4 夹角p95
             try:
                 return float(f[-6]), float(f[-5]), float(f[-4])
             except Exception:
@@ -26,6 +32,7 @@ def metrics(p):
 
 
 def row(label, p):
+    """读 GLB 的 bbox 最长轴 + 平滑度指标，返回一行 (label, 长轴, 夹角均值, 夹角p95, 尖边占比)。"""
     m = trimesh.load(p, force='mesh', process=False, skip_materials=True)
     b = np.asarray(m.bounds[1] - m.bounds[0])
     ax = 'xyz'[int(np.argmax(b))]
@@ -34,6 +41,7 @@ def row(label, p):
 
 
 def main():
+    """汇总 A 组(10k–50k)、A+y/z 交换组与旧 33k 基线的朝向/平滑度对照表；返回 0。"""
     print('=' * 96)
     print('任务 4 交付：SS LoRA 10k–50k（shape flow 固定 20k，data_test/001.png）')
     print('=' * 96)

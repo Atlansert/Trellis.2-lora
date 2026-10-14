@@ -1,3 +1,11 @@
+"""Dense（非稀疏）全注意力统一入口。
+
+scaled_dot_product_attention 支持 3 种调用签名（qkv 打包 / q+kv 打包 / q,k,v 分离），
+内部按 config.BACKEND 分派到 xformers、flash-attn(v1/v3)、PyTorch SDPA 或朴素实现。
+张量布局约定：序列在前的 [N, L, H, C]（flash-attn 风格），仅 naive/sdpa 分支临时转成
+[N, H, L, C]。返回值统一为 [N, L, H, C]。
+"""
+
 from typing import *
 import torch
 import math
@@ -61,6 +69,7 @@ def scaled_dot_product_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tens
     ...
 
 def scaled_dot_product_attention(*args, **kwargs):
+    # 统一入口：1 个参数=qkv([N,L,3,H,C])，2 个=q+kv([N,L,H,C] 与 [N,L,2,H,C])，3 个=q,k,v
     arg_names_dict = {
         1: ['qkv'],
         2: ['q', 'kv'],
@@ -95,6 +104,7 @@ def scaled_dot_product_attention(*args, **kwargs):
         device = q.device    
 
     if config.BACKEND == 'xformers':
+        # xformers 接受 [N, L, H, C]
         if 'xops' not in globals():
             import xformers.ops as xops
         if num_all_args == 1:
@@ -122,6 +132,7 @@ def scaled_dot_product_attention(*args, **kwargs):
             elif num_all_args == 3:
                 out = flash_attn_3.flash_attn_func(q, k, v)
     elif config.BACKEND == 'sdpa':
+        # PyTorch 原生 SDPA 要求 head 维在前，故这里做 permute 往返
         if 'sdpa' not in globals():
             from torch.nn.functional import scaled_dot_product_attention as sdpa
         if num_all_args == 1:

@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：Stage1（SS）LoRA 训练，监督目标改为"规范帧"（latent_frame=canonical）+ DINOv3@512，50k 步。
+# 用法：bash scripts/run_ss_lora_canonical_dinov3_50k.sh [GPU 号，默认 5]。
+# 输出：results/multiview_1186_ss_flow_lora_64_views_canonical/。
+# 边界：长跑 GPU 训练任务，持续写该输出目录；与 dinov3_512 那轮唯一差别就是监督目标口径。
 # Stage1 SS LoRA —— **规范帧**目标（canonical）+ DINOv3@512 条件，50k 步。
 #
 # 与 ss_flow_lora_64_views_dinov3_512_50k 的唯一区别是监督目标的口径：

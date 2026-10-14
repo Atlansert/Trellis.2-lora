@@ -1,5 +1,10 @@
+"""渲染器包：把 mesh / voxel 表示渲染成图片（训练时的多视图监督与可视化都用它）。
+
+按名字懒加载：MeshRenderer（几何）、PbrMeshRenderer（PBR 材质 + 环境光）、VoxelRenderer。
+"""
 import importlib
 
+# 类名 -> 子模块名
 __attributes = {
     'MeshRenderer': 'mesh_renderer',
     'VoxelRenderer': 'voxel_renderer',

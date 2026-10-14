@@ -14,6 +14,9 @@
     checkpoints/ckpts/shape_dec_next_dc_f16c32_fp16.pt
     checkpoints/ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.pt
     checkpoints/ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.pt
+
+安全边界：只读 checkpoints/ckpts/ 下的 .json/.safetensors，只在同目录写 .pt（已存在则跳过，不覆盖）；
+          脚本硬编码 CUDA_VISIBLE_DEVICES=7（from_pretrained 会在该卡上建模型）。
 """
 
 import os
@@ -68,6 +71,7 @@ def convert_safetensors_to_pt(local_path: str, output_path: str):
 
 
 def main():
+    """按文件内固定清单把 4 个模型转成 .pt：先统一检查源文件，再逐个转换（已存在则跳过），失败即退出非 0。"""
     # 转换列表: (本地路径前缀, 输出路径)
     # 服务器 C 上 safetensors 在 checkpoints/ckpts/ 下
     conversions = [
@@ -107,6 +111,7 @@ def main():
     print(f"\n开始转换...")
 
     for local_path, output_name in conversions:
+        # 已存在则跳过：不重复转换，也不覆盖既有 .pt。
         if os.path.exists(output_name):
             size_mb = os.path.getsize(output_name) / (1024 * 1024)
             print(f"\n[跳过] {output_name} 已存在 ({size_mb:.1f} MB)")

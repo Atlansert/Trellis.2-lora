@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：单图 data_test/001.png 推理：Stage1 SS LoRA 32000 + Stage2 保持预训练（不挂 shape LoRA），固定 GPU 5。
+# 用法：bash scripts/inference_history/infer_stage1_032000_stage2_pretrained_001_gpu5.sh（无参数）。
+# 输出：results_infer/data_test_stage1_lora_032000_stage2_pretrained_1024/（001.glb、run.log、infer.log）。
+# 边界：会 mkdir 输出目录并跑 GPU 推理（--no_video）；SS 权重缺失退 2，没产出 001.glb 退 3。
 # Inference: Stage1 SS LoRA step 32000 + Stage2 pretrained (no LoRA), 001 only, GPU 5.
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"

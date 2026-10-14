@@ -46,12 +46,16 @@ import numpy as np
 import open3d as o3d
 
 
+# 绕 Z 轴（竖直轴）的 3x3 旋转矩阵，deg 为角度；用于逐视角环绕旋转顶点。
 def rz(deg):
     a = np.deg2rad(deg)
     c, s = np.cos(a), np.sin(a)
     return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], dtype=np.float64)
 
 
+# 单对象任务：合并 mesh_dumps 的分部件顶点/面，先按标定的轴映射+符号（+偏移）把 dump 帧
+# 映射到渲染帧，再逐视角绕 Z 旋转并体素化成 res^3 网格，存 coords(uint8) 到 <out>/<obj>/NNN.npz。
+# 已存在的结果在未加 --overwrite 时直接跳过。返回 (对象名, 完成视角数, 错误信息)。
 def one(job):
     root, obj, out_name, res, num_views, overwrite, axis_map, signs, yaw_offset, perm = job
     dump_path = os.path.join(root, 'mesh_dumps', obj + '.pickle')
@@ -97,6 +101,7 @@ def one(job):
                 min_bound=(-.5, -.5, -.5), max_bound=(.5, .5, .5))
             coords = np.array([v.grid_index for v in grid.get_voxels()], dtype=np.uint8)
         else:
+            # 无面数据（空面）兜底：直接按顶点栅格化取整去重。
             coords = np.unique(np.clip(np.floor((vv + .5) * res), 0, res - 1), axis=0).astype(np.uint8)
         if perm is not None and len(coords):
             coords = coords[:, perm]
@@ -109,6 +114,7 @@ def one(job):
     return obj, done, ''
 
 
+# CLI 入口：标定参数 axis_map/signs/offset 作用于**顶点**，perm 作用于**体素输出**，两者独立。
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--root', required=True)

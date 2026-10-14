@@ -1,3 +1,12 @@
+"""形状 VAE 训练器（结构化潜变量 / 稀疏体素）。
+
+职责：训练形状 VAE——encoder 把每个活跃体素的顶点与相交标记编码为潜变量，
+decoder 重建网格（顶点、相交标记、细分结果）；除直接回归外还用随机相机渲染
+GT 与重建网格，用 mask/depth/normal 的 L1+SSIM+LPIPS 监督，加 KL 正则。
+输入：vertices/intersected（稀疏张量）与 mesh（GT 网格列表）；输出：terms（分项损失）与渲染快照。
+契约：渲染监督要求同一组随机相机同时渲染 GT 与重建，否则对比无意义；lambda_* 为各项权重。
+"""
+
 from typing import *
 import os
 import copy
@@ -20,6 +29,8 @@ from ...utils.loss_utils import l1_loss, ssim, lpips
 class ShapeVaeTrainer(BasicTrainer):
     """
     Trainer for Shape VAE
+    
+    形状 VAE 训练器：体素隐变量重建 + 随机相机可微渲染监督（mask/depth/normal）+ KL。
     
     Args:
         models (dict[str, nn.Module]): Models to train.
@@ -92,6 +103,7 @@ class ShapeVaeTrainer(BasicTrainer):
     def prepare_dataloader(self, **kwargs):
         """
         Prepare dataloader.
+        均衡可恢复采样 + 多进程 DataLoader；同样在 collate 阶段按 batch_split 切分。
         """
         self.data_sampler = BalancedResumableSampler(
             self.dataset,
@@ -111,6 +123,8 @@ class ShapeVaeTrainer(BasicTrainer):
         self.data_iterator = cycle(self.dataloader)
         
     def _randomize_camera(self, num_samples: int):
+        # 随机相机：半径以 1/r^2 均匀采样（近似按面积均匀），fov = 2·asin(0.5/r) 保证物体占满视野；
+        # 相机朝向原点、up 轴取 +z；near 在 [r-1, r] 内随机以拉开深度范围
         # sample radius and fov
         r_min, r_max = self.camera_randomization_config['radius_range']
         k_min = 1 / r_max**2
@@ -150,9 +164,11 @@ class ShapeVaeTrainer(BasicTrainer):
         """
         ret = {k : [] for k in return_types}
         for i, rep in enumerate(reps):
+            # 每个样本单独设 near/far（far = near + 2，与 MeshRenderer 的配置对应）
             self.renderer.rendering_options['near'] = near[i]
             self.renderer.rendering_options['far'] = near[i] + 2
             out_dict = self.renderer.render(rep, extrinsics[i], intrinsics[i], return_types=return_types)
+            # mask/depth 渲染结果缺通道维，这里补一维便于后续 stack/比较
             for k in out_dict:
                 ret[k].append(out_dict[k][None] if k in ['mask', 'depth'] else out_dict[k])
         for k in ret:
@@ -177,12 +193,14 @@ class ShapeVaeTrainer(BasicTrainer):
             a dict with the key "loss" containing a scalar tensor.
             may also contain other keys for different terms.
         """
+        # 编码：重参数化采样并返回 mean/logvar；解码同时给出重建网格与细分预测
         z, mean, logvar = self.training_models['encoder'](vertices, intersected, sample_posterior=True, return_raw=True)
         recon, pred_vertice, pred_intersected, subs_gt, subs = self.training_models['decoder'](z, intersected)
         
         terms = edict(loss = 0.0)
         
         # direct regression
+        # 直接回归项：相交标记用 BCE（先 flatten），顶点坐标用 MSE
         if self.lambda_intersected > 0:
             terms["direct/intersected"] = F.binary_cross_entropy_with_logits(pred_intersected.feats.flatten(), intersected.feats.flatten().float())
             terms["loss"] = terms["loss"] + self.lambda_intersected * terms["direct/intersected"]
@@ -191,14 +209,17 @@ class ShapeVaeTrainer(BasicTrainer):
             terms["loss"] = terms["loss"] + self.lambda_vertice * terms["direct/vertice"]
             
         # subdivision prediction loss
+        # 逐级细分预测的 BCE（subs_gt 为各层真值，subs 为各层预测）
         for i, (sub_gt, sub) in enumerate(zip(subs_gt, subs)):
             terms[f"bce_sub{i}"] = F.binary_cross_entropy_with_logits(sub.feats, sub_gt.float())
             terms["loss"] = terms["loss"] + self.lambda_subdiv * terms[f"bce_sub{i}"]
             
         # rendering loss
+        # 同一组随机相机分别渲染 GT 与重建网格（mask/depth/normal），保证逐像素可比
         cameras = self._randomize_camera(len(mesh))
         gt_renders = self._render_batch(mesh, **cameras, return_types=['mask', 'normal', 'depth'])
         pred_renders = self._render_batch(recon, **cameras, return_types=['mask', 'normal', 'depth'])
+        # mask/depth 用 L1；normal 用 L1 + SSIM + LPIPS 组合，权重由 lambda_* 控制
         terms['render/mask'] = l1_loss(pred_renders['mask'], gt_renders['mask'])
         terms['render/depth'] = l1_loss(pred_renders['depth'], gt_renders['depth'])
         terms['render/normal/l1'] = l1_loss(pred_renders['normal'], gt_renders['normal'])
@@ -210,6 +231,7 @@ class ShapeVaeTrainer(BasicTrainer):
                         self.lambda_normal * (terms['render/normal/l1'] + self.lambda_ssim * terms['render/normal/ssim'] + self.lambda_lpips * terms['render/normal/lpips'])
        
         # KL regularization     
+        # KL 正则：约束后验接近标准正态，权重 lambda_kl
         terms["kl"] = 0.5 * torch.mean(mean.pow(2) + logvar.exp() - logvar - 1)
         terms["loss"] = terms["loss"] + self.lambda_kl * terms["kl"]
             
@@ -238,6 +260,8 @@ class ShapeVaeTrainer(BasicTrainer):
             num_samples = min(num_samples, data['vertices'].shape[0])
 
         # inference
+        # 两条解码路径都做快照：y 用训练态 decoder（带 intersected 输入），
+        # y2 用 eval 态 decoder（不带 intersected，即推理时的调用方式），便于对比
         gts = []
         recons = []
         recons2 = []
@@ -258,6 +282,7 @@ class ShapeVaeTrainer(BasicTrainer):
         self.models['encoder'].train()
         self.models['decoder'].train()
         
+        # 渲染 GT / 两种重建的法线图做可视化；相机在 eval 结束后统一随机
         cameras = self._randomize_camera(num_samples)
         gt_renders = self._render_batch(gts, **cameras, return_types=['normal'])
         recons_renders = self._render_batch(recons, **cameras, return_types=['normal'])

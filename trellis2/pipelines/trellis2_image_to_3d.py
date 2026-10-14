@@ -1,3 +1,13 @@
+"""单图 → 3D 资产的主推理流水线。
+
+流程：图像预处理（抠图 + 方形裁剪）→ 图像条件编码 → 采样稀疏结构 SS
+→ 解码得到占据体素坐标 → 采样 shape SLat（可选级联上采样）→ 采样 texture SLat
+→ 解码为带 PBR 属性的体素 → 组装 MeshWithVoxel 输出。
+
+pipeline_type 支持 '512' / '1024' / '1024_cascade' / '1536_cascade'；
+另有坐标开关 ss_canonicalize（逐样本把最长轴对齐到第 2 个空间轴）
+与 ss_swap_yz（全局交换 y/z，用于修正本地 SS LoRA 的朝向），默认都关闭。
+"""
 from typing import *
 import torch
 import torch.nn as nn
@@ -14,6 +24,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
     """
     Pipeline for inferring Trellis2 image-to-3D models.
 
+    三个阶段共用同一套条件编码器；各阶段采样器与参数由 pipeline.json 提供。
+
     Args:
         models (dict[str, nn.Module]): The models to use in the pipeline.
         sparse_structure_sampler (samplers.Sampler): The sampler for the sparse structure.
@@ -28,6 +40,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         rembg_model (Callable): The model for removing background.
         low_vram (bool): Whether to use low-VRAM mode.
     """
+    # base.Pipeline.from_pretrained 只加载这里列出的组件
     model_names_to_load = [
         'sparse_structure_flow_model',
         'sparse_structure_decoder',
@@ -58,6 +71,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         ss_cond_resolution: int = 518,
         ss_cond_crop_scale: float = 1.2,
     ):
+        # models 为 None 时不初始化，交由 from_pretrained 填充
         if models is None:
             return
         super().__init__(models)
@@ -73,6 +87,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         self.rembg_model = rembg_model
         self.low_vram = low_vram
         self.default_pipeline_type = default_pipeline_type
+        # tex_slat_decoder 输出的通道切片：前 6 维即 PBR 的 base_color/metal/rough/alpha
         self.pbr_attr_layout = {
             'base_color': slice(0, 3),
             'metallic': slice(3, 4),
@@ -92,6 +107,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         pipeline = super().from_pretrained(path, config_file)
         args = pipeline._pretrained_args
 
+        # 按配置里的类名从 samplers 模块实例化三个阶段的采样器，并记录各自默认采样参数
         pipeline.sparse_structure_sampler = getattr(samplers, args['sparse_structure_sampler']['name'])(**args['sparse_structure_sampler']['args'])
         pipeline.sparse_structure_sampler_params = args['sparse_structure_sampler']['params']
 
@@ -101,9 +117,11 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         pipeline.tex_slat_sampler = getattr(samplers, args['tex_slat_sampler']['name'])(**args['tex_slat_sampler']['args'])
         pipeline.tex_slat_sampler_params = args['tex_slat_sampler']['params']
 
+        # 潜变量的反归一化统计量（采样得到的是归一化空间的值）
         pipeline.shape_slat_normalization = args['shape_slat_normalization']
         pipeline.tex_slat_normalization = args['tex_slat_normalization']
 
+        # 图像条件编码器（三条链路默认共用）
         pipeline.image_cond_model = getattr(image_feature_extractor, args['image_cond_model']['name'])(**args['image_cond_model']['args'])
         # 可选的 SS 专用条件编码器：留空则三条链路共用 image_cond_model。
         ss_cfg = args.get('ss_image_cond_model')
@@ -114,6 +132,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             pipeline.ss_cond_crop_scale = ss_cfg.get('crop_scale', 1.2)
         else:
             pipeline.ss_image_cond_model = None
+        # 抠图模型，供 preprocess_image 处理没有 alpha 的输入
         pipeline.rembg_model = getattr(rembg, args['rembg_model']['name'])(**args['rembg_model']['args'])
         
         pipeline.low_vram = args.get('low_vram', True)
@@ -137,6 +156,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
 
     def to(self, device: torch.device) -> None:
         self._device = device
+        # low_vram 模式不常驻显存，改为每个阶段用前临时搬运（见各 sample_*/decode_*）
         if not self.low_vram:
             super().to(device)
             self.image_cond_model.to(device)
@@ -152,11 +172,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 （官方口径）；>1.0 留出边距（复刻旧 SS run 的 1.2 口径）。
         """
         # if has alpha channel, use it directly; otherwise, remove background
+        # 有非全不透明 alpha 就直接当蒙版用，否则跑抠图模型
         has_alpha = False
         if input.mode == 'RGBA':
             alpha = np.array(input)[:, :, 3]
             if not np.all(alpha == 255):
                 has_alpha = True
+        # 长边超过 1024 先等比缩小
         max_size = max(input.size)
         scale = min(1, 1024 / max_size)
         if scale < 1:
@@ -172,6 +194,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 self.rembg_model.cpu()
         output_np = np.array(output)
         alpha = output_np[:, :, 3]
+        # 以 alpha>0.8 为前景，求包围盒后取中心方形区域（size 已按 crop_scale 放大留边）
         bbox = np.argwhere(alpha > 0.8 * 255)
         bbox = np.min(bbox[:, 1]), np.min(bbox[:, 0]), np.max(bbox[:, 1]), np.max(bbox[:, 0])
         center = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
@@ -180,6 +203,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         bbox = center[0] - size // 2, center[1] - size // 2, center[0] + size // 2, center[1] + size // 2
         output = output.crop(bbox)  # type: ignore
         output = np.array(output).astype(np.float32) / 255
+        # RGB 乘以 alpha（预乘）：背景变黑，避免抠图残留影响条件编码
         output = output[:, :, :3] * output[:, :, 3:4]
         output = Image.fromarray((output * 255).astype(np.uint8))
         return output
@@ -188,12 +212,15 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         """
         Get the conditioning information for the model.
 
+        返回 {'cond': 图像特征, 'neg_cond': 同形状全零}，供 CFG 采样使用。
+
         Args:
             image (Union[torch.Tensor, list[Image.Image]]): The image prompts.
 
         Returns:
             dict: The conditioning information
         """
+        # 条件编码器的输入分辨率随阶段切换（SS 用 512，1024 阶段用 1024）
         self.image_cond_model.image_size = resolution
         if self.low_vram:
             self.image_cond_model.to(self.device)
@@ -257,10 +284,12 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             sampler_params (dict): Additional parameters for the sampler.
         """
         # Sample sparse structure latent
+        # 在 SS 模型原生分辨率上从纯噪声开始采样（reso^3 稠密潜变量）
         flow_model = self.models['sparse_structure_flow_model']
         reso = flow_model.resolution
         in_channels = flow_model.in_channels
         noise = torch.randn(num_samples, in_channels, reso, reso, reso).to(self.device)
+        # 默认采样参数 + 本次调用传入的覆盖项
         sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
         if self.low_vram:
             flow_model.to(self.device)
@@ -276,15 +305,18 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             flow_model.cpu()
         
         # Decode sparse structure latent
+        # 解码 SS 潜变量，> 0 视为占据
         decoder = self.models['sparse_structure_decoder']
         if self.low_vram:
             decoder.to(self.device)
         decoded = decoder(z_s)>0
         if self.low_vram:
             decoder.cpu()
+        # 解码分辨率高于目标 SS 分辨率时做 max_pool 降采样
         if resolution != decoded.shape[2]:
             ratio = decoded.shape[2] // resolution
             decoded = torch.nn.functional.max_pool3d(decoded.float(), ratio, ratio, 0) > 0.5
+        # 取占据体素坐标，列序为 (batch, x, y, z)
         coords = torch.argwhere(decoded)[:, [0, 2, 3, 4]].int()
 
         return coords
@@ -305,6 +337,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             sampler_params (dict): Additional parameters for the sampler.
         """
         # Sample structured latent
+        # 在 SS 给出的占据坐标上采样：每个体素一个 token，初始特征是纯噪声
         noise = SparseTensor(
             feats=torch.randn(coords.shape[0], flow_model.in_channels).to(self.device),
             coords=coords,
@@ -323,6 +356,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if self.low_vram:
             flow_model.cpu()
 
+        # 采样得到的是归一化空间的值，按 shape 统计量还原回真实尺度
         std = torch.tensor(self.shape_slat_normalization['std'])[None].to(slat.device)
         mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(slat.device)
         slat = slat * std + mean
@@ -350,6 +384,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             sampler_params (dict): Additional parameters for the sampler.
         """
         # LR
+        # 第一步：在 SS 坐标上用 512 低分辨率模型采样一遍 shape SLat
         noise = SparseTensor(
             feats=torch.randn(coords.shape[0], flow_model_lr.in_channels).to(self.device),
             coords=coords,
@@ -372,6 +407,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         slat = slat * std + mean
         
         # Upsample
+        # 第二步：用 shape decoder 把占据坐标上采样 4 倍，作为高分辨率采样点位
         if self.low_vram:
             self.models['shape_slat_decoder'].to(self.device)
             self.models['shape_slat_decoder'].low_vram = True
@@ -380,6 +416,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             self.models['shape_slat_decoder'].cpu()
             self.models['shape_slat_decoder'].low_vram = False
         hr_resolution = resolution
+        # 把坐标量化到目标分辨率；若 token 数超过上限则每次降 128，最低到 1024
         while True:
             quant_coords = torch.cat([
                 hr_coords[:, :1],
@@ -394,6 +431,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             hr_resolution -= 128
         
         # Sample structured latent
+        # 第三步：在高分辨率坐标上重采样，得到最终的 shape SLat
         noise = SparseTensor(
             feats=torch.randn(coords.shape[0], flow_model.in_channels).to(self.device),
             coords=coords,
@@ -412,6 +450,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if self.low_vram:
             flow_model.cpu()
 
+        # 采样得到的是归一化空间的值，按 shape 统计量还原回真实尺度
         std = torch.tensor(self.shape_slat_normalization['std'])[None].to(slat.device)
         mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(slat.device)
         slat = slat * std + mean
@@ -434,6 +473,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             List[SparseTensor]: The decoded substructures.
         """
         self.models['shape_slat_decoder'].set_resolution(resolution)
+        # 解码出网格与子结构（subs 会作为纹理解码的引导）
         if self.low_vram:
             self.models['shape_slat_decoder'].to(self.device)
             self.models['shape_slat_decoder'].low_vram = True
@@ -459,11 +499,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             sampler_params (dict): Additional parameters for the sampler.
         """
         # Sample structured latent
+        # shape_slat 先归一化（与纹理模型训练时的输入口径一致）
         std = torch.tensor(self.shape_slat_normalization['std'])[None].to(shape_slat.device)
         mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(shape_slat.device)
         shape_slat = (shape_slat - mean) / std
 
         in_channels = flow_model.in_channels if isinstance(flow_model, nn.Module) else flow_model[0].in_channels
+        # 噪声只补足纹理模型多出的通道，其余通道由 shape 特征 concat 提供（concat_cond）
         noise = shape_slat.replace(feats=torch.randn(shape_slat.coords.shape[0], in_channels - shape_slat.feats.shape[1]).to(self.device))
         sampler_params = {**self.tex_slat_sampler_params, **sampler_params}
         if self.low_vram:
@@ -480,6 +522,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         if self.low_vram:
             flow_model.cpu()
 
+        # 按 texture 统计量反归一化
         std = torch.tensor(self.tex_slat_normalization['std'])[None].to(slat.device)
         mean = torch.tensor(self.tex_slat_normalization['mean'])[None].to(slat.device)
         slat = slat * std + mean
@@ -502,6 +545,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         """
         if self.low_vram:
             self.models['tex_slat_decoder'].to(self.device)
+        # 解码纹理潜变量；*0.5+0.5 把输出映射到 [0, 1] 的 PBR 属性区间
         ret = self.models['tex_slat_decoder'](slat, guide_subs=subs) * 0.5 + 0.5
         if self.low_vram:
             self.models['tex_slat_decoder'].cpu()
@@ -522,10 +566,12 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             tex_slat (SparseTensor): The structured latent for texture.
             resolution (int): The resolution of the output.
         """
+        # 先解形状（得到网格与其子结构），再用子结构引导解纹理，得到 PBR 体素
         meshes, subs = self.decode_shape_slat(shape_slat, resolution)
         tex_voxels = self.decode_tex_slat(tex_slat, subs)
         out_mesh = []
         for m, v in zip(meshes, tex_voxels):
+            # 补洞后组装成带体素 PBR 属性的网格表示
             m.fill_holes()
             out_mesh.append(
                 MeshWithVoxel(
@@ -570,6 +616,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             max_num_tokens (int): The maximum number of tokens to use.
         """
         # Check pipeline type
+        # 1) 校验 pipeline_type 合法，并确认该类型所需的 flow 模型都已加载
         pipeline_type = pipeline_type or self.default_pipeline_type
         if pipeline_type == '512':
             assert 'shape_slat_flow_model_512' in self.models, "No 512 resolution shape SLat flow model found."
@@ -588,12 +635,14 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         else:
             raise ValueError(f"Invalid pipeline type: {pipeline_type}")
         
+        # 2) 预处理图像 + 固定种子，再分别编码 512 / 1024 两档条件
         if preprocess_image:
             image = self.preprocess_image(image)
         torch.manual_seed(seed)
         cond_512 = self.get_cond([image], 512)
         cond_1024 = self.get_cond([image], 1024) if pipeline_type != '512' else None
         ss_res = {'512': 32, '1024': 64, '1024_cascade': 32, '1536_cascade': 32}[pipeline_type]
+        # 3) 采样稀疏结构：分辨率由 pipeline_type 决定，得到占据体素坐标
         coords = self.sample_sparse_structure(
             self.get_ss_cond([image]), ss_res,
             num_samples, sparse_structure_sampler_params
@@ -620,6 +669,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             # 本地训出的 LoRA 输出 y/z 交换过的坐标，这里换回来。
             # coords 形状为 (N, 4) = (batch, x, y, z)
             coords = coords[:, [0, 1, 3, 2]]
+        # 4) 采样 shape SLat 与 texture SLat
+        #    512 / 1024 为单模型直采；1024_cascade / 1536_cascade 先用 512 再上采样重采；
+        #    纹理阶段始终以 shape SLat 作为 concat 条件
         if pipeline_type == '512':
             shape_slat = self.sample_shape_slat(
                 cond_512, self.models['shape_slat_flow_model_512'],
@@ -664,6 +716,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 cond_1024, self.models['tex_slat_flow_model_1024'],
                 shape_slat, tex_slat_sampler_params
             )
+        # 5) 解码潜变量并导出网格；return_latent 时额外返回 (shape_slat, tex_slat, res)
         torch.cuda.empty_cache()
         out_mesh = self.decode_latent(shape_slat, tex_slat, res)
         if return_latent:

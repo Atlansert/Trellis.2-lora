@@ -1,3 +1,13 @@
+"""稀疏体素 PBR 的结构化潜变量（SLat）数据集。
+
+职责：读取物体的 PBR 潜变量作为训练目标 x_0，并把同一物体的 shape 潜变量作为条件
+concat_cond；可视化时先用 shape 解码器得到细分结构，再用它引导 PBR 解码器出材质体素，
+最后用 PBR 渲染器（需 HDRI 环境贴图）渲染多视角图。
+输入：roots 与 resolution/attrs/各解码器配置；输出：{'x_0': pbr 潜变量, 'concat_cond': shape 潜变量}。
+契约：PBR 与 shape 潜变量的 coords 必须完全一致（否则断言失败）；两组潜变量各有独立的
+mean/std 归一化统计，解码前必须各自反归一化；attrs/layout 定义属性通道切片。
+"""
+
 import os
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
 import json
@@ -15,6 +25,8 @@ from ..utils.render_utils import yaw_pitch_r_fov_to_extrinsics_intrinsics
 
 
 class SLatPbrVisMixin:
+    """PBR SLat 可视化 mixin：加载 shape/PBR 两个解码器，渲染带材质与光照的多视角图。"""
+
     def __init__(
         self,
         *args,
@@ -37,6 +49,7 @@ class SLatPbrVisMixin:
         self.shape_slat_dec_ckpt = shape_slat_dec_ckpt
         
     def _loading_slat_dec(self):
+        # 两个解码器都惰性加载：各自优先本地 ckpt，否则用预训练权重；shape 解码器需设分辨率
         if self.pbr_slat_dec is not None and self.shape_slat_dec is not None:
             return
         if self.pbr_slat_dec_path is not None:
@@ -66,14 +79,17 @@ class SLatPbrVisMixin:
         
     @torch.no_grad()
     def decode_latent(self, z, shape_z, batch_size=4):
+        """先解码 shape 潜变量得到细分结构 subs，再用 subs 引导 PBR 解码器；输出 MeshWithVoxel 列表。"""
         self._loading_slat_dec()
         reps = []
+        # 两组潜变量各自反归一化（乘以 std 再加 mean）后送入解码器
         if self.shape_slat_normalization is not None:
             shape_z = shape_z * self.shape_slat_std.to(z.device) + self.shape_slat_mean.to(z.device)
         if self.pbr_slat_normalization is not None:
             z = z * self.pbr_slat_std.to(z.device) + self.pbr_slat_mean.to(z.device)
         for i in range(0, z.shape[0], batch_size):
             mesh, subs = self.shape_slat_dec(shape_z[i:i+batch_size], return_subs=True)
+            # PBR 解码输出在 [-1,1]，*0.5+0.5 还原到 [0,1] 供渲染使用
             vox = self.pbr_slat_dec(z[i:i+batch_size], guide_subs=subs) * 0.5 + 0.5
             reps.extend([
                 MeshWithVoxel(
@@ -92,6 +108,7 @@ class SLatPbrVisMixin:
     
     @torch.no_grad()
     def visualize_sample(self, sample: dict):
+        """用 concat_cond(shape 潜变量) + x_0(PBR 潜变量) 解码并渲染多视角 PBR 图。"""
         shape_z = sample['concat_cond'].cuda()
         z = sample['x_0'].cuda()
         reps = self.decode_latent(z, shape_z)
@@ -104,6 +121,7 @@ class SLatPbrVisMixin:
         exts, ints = yaw_pitch_r_fov_to_extrinsics_intrinsics(yaw, pitch, 2, 30)
         
         # render
+        # PBR 渲染：512 分辨率、8 层剥离(peel)处理透明、固定 HDRI 环境贴图提供光照
         renderer = PbrMeshRenderer()
         renderer.rendering_options.resolution = 512
         renderer.rendering_options.near = 1
@@ -137,6 +155,8 @@ class SLatPbrVisMixin:
 class SLatPbr(SLatPbrVisMixin, StandardDatasetBase):
     """
     structured latent for sparse voxel pbr dataset
+    
+    PBR SLat 数据集：目标是 PBR 潜变量，条件是同物体的 shape 潜变量（concat_cond）。
     
     Args:
         roots (str): path to the dataset
@@ -200,6 +220,7 @@ class SLatPbr(SLatPbrVisMixin, StandardDatasetBase):
             self.shape_slat_std = torch.tensor(self.shape_slat_normalization['std']).reshape(1, -1)
         
         self.attrs = attrs
+        # 各属性通道数 -> layout 定义它们在潜变量 feats 里的切片
         self.channels = {
             'base_color': 3,
             'metallic': 1,
@@ -214,6 +235,7 @@ class SLatPbr(SLatPbrVisMixin, StandardDatasetBase):
             start += self.channels[attr]
             
     def filter_metadata(self, metadata):
+        # 过滤：PBR 与 shape 潜变量都已编码 -> 美学分达标 -> token 数上限；full_pbr 时还要求三类贴图齐全
         stats = {}
         metadata = metadata[metadata['pbr_latent_encoded'] == True]
         stats['With PBR latent'] = len(metadata)
@@ -231,7 +253,7 @@ class SLatPbr(SLatPbrVisMixin, StandardDatasetBase):
         return metadata, stats
     
     def get_instance(self, root, instance):
-        # PBR latent
+        # 读取 PBR 潜变量 npz：coords 前补 batch 维，feats 按 PBR 统计标准化
         data = np.load(os.path.join(root['pbr_latent'], f'{instance}.npz'))
         coords = torch.tensor(data['coords']).int()
         coords = torch.cat([torch.zeros_like(coords)[:, :1], coords], dim=1)
@@ -240,7 +262,7 @@ class SLatPbr(SLatPbrVisMixin, StandardDatasetBase):
             feats = (feats - self.pbr_slat_mean) / self.pbr_slat_std
         pbr_z = SparseTensor(feats, coords)
         
-        # Shape latent
+        # 读取 shape 潜变量 npz（作为条件），用 shape 自己的统计标准化
         data = np.load(os.path.join(root['shape_latent'], f'{instance}.npz'))
         coords = torch.tensor(data['coords']).int()
         coords = torch.cat([torch.zeros_like(coords)[:, :1], coords], dim=1)
@@ -249,6 +271,7 @@ class SLatPbr(SLatPbrVisMixin, StandardDatasetBase):
             feats = (feats - self.shape_slat_mean) / self.shape_slat_std
         shape_z = SparseTensor(feats, coords)
         
+        # 关键契约：PBR 与 shape 潜变量必须共享同一套体素坐标，否则无法用 shape 引导 PBR 解码
         assert torch.equal(shape_z.coords, pbr_z.coords), \
             f"Shape latent and PBR latent have different coordinates: {shape_z.coords.shape} vs {pbr_z.coords.shape}"
             
@@ -259,6 +282,7 @@ class SLatPbr(SLatPbrVisMixin, StandardDatasetBase):
         
     @staticmethod
     def collate_fn(batch, split_size=None):
+        """按 PBR 潜变量 token 数均衡分组拼批：Tensor stack、SparseTensor sparse_cat、list 展平。"""
         if split_size is None:
             group_idx = [list(range(len(batch)))]
         else:
@@ -289,5 +313,6 @@ class SLatPbr(SLatPbrVisMixin, StandardDatasetBase):
 class ImageConditionedSLatPbr(ImageConditionedMixin, SLatPbr):
     """
     Image conditioned structured latent dataset
+    单图条件版 PBR SLat 数据集：cond 图像由 components.ImageConditionedMixin 提供。
     """
     pass

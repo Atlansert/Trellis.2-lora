@@ -4,6 +4,9 @@
 做法：把条件置零（cond = neg_cond = 0）做纯无条件采样，看各权重输出的长轴。
 若各权重在无条件下都落在同一根轴，说明"正确朝向"是模型先验，
 反转是图像条件把它拉走的——那么新配置的毛病就是"条件通路被训得更"强/更歪"。
+
+运行：无参数；需 GPU（默认卡 5），脚本内已 chdir 到项目根。
+安全边界：只读权重与 data_test/*.png，不写任何文件；纯探针，不产出 checkpoint。
 """
 import os
 import sys
@@ -33,6 +36,7 @@ IMGS = ['001', '002', '003', '004']
 
 
 def main():
+    """对 base / 旧 50k / 新A 50k 三组权重，分别用"无条件(条件置零)"与"图像条件"采样 SS，对比长轴与跨度。"""
     pipe = Trellis2ImageTo3DPipeline.from_pretrained('checkpoints')
     pipe.cuda()
     ss = pipe.models['sparse_structure_flow_model']
@@ -45,9 +49,11 @@ def main():
     ss_c = pipe.models['sparse_structure_flow_model'].in_channels
     # 条件特征维度取自实际 cond
     k = next(iter(conds.values()))['cond']
+    # 条件全 0：等价于无条件采样（guidance 的 cond/neg_cond 都置零）。
     zero = {'cond': torch.zeros_like(k), 'neg_cond': torch.zeros_like(k)}
 
     def occ(cond):
+        """按固定种子(42)采样 SS 占据体，返回 64³ 布尔体素。"""
         torch.manual_seed(42)
         c = pipe.sample_sparse_structure(cond, 64, 1, dict(P)).cpu().numpy()
         o = np.zeros((64, 64, 64), bool)
@@ -56,6 +62,7 @@ def main():
         return o
 
     def desc(o):
+        """返回 (最长轴, 各轴跨度, 体素数)；空占据体返回 ('empty',(0,0,0),0)。"""
         nz = np.argwhere(o)
         if not len(nz):
             return 'empty', (0, 0, 0), 0

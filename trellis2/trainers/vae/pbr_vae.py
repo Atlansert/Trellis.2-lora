@@ -1,3 +1,13 @@
+"""PBR 属性 VAE 训练器（稀疏体素 + 材质属性）。
+
+职责：训练 PBR VAE——encoder 把稀疏体素的材质属性（base_color/metallic/roughness/alpha）
+编码为潜变量，decoder 重建属性；损失为 feats 上的直接回归（l1/l2）+ 把重建结果包回
+带材质网格后用随机相机渲染的 SSIM/LPIPS 监督 + KL 正则。
+输入：x（属性稀疏张量）与 mesh（带 PBR 材质的 GT 网格列表）；输出：分项损失与渲染快照。
+契约：渲染监督要求同一组相机同时渲染 GT 与重建；feats 属于 [-1,1] 归一化空间，
+渲染前需用 feats*0.5+0.5 还原到 [0,1]；layout 定义各通道切片的语义。
+"""
+
 from typing import *
 import os
 import copy
@@ -20,6 +30,8 @@ from ...utils.loss_utils import l1_loss, l2_loss, ssim, lpips
 class PbrVaeTrainer(BasicTrainer):
     """
     Trainer for PBR attributes VAE
+    
+    PBR 材质属性 VAE 训练器：属性重建 + 可微渲染（base_color / MRA）监督 + KL。
     
     Args:
         models (dict[str, nn.Module]): Models to train.
@@ -82,6 +94,7 @@ class PbrVaeTrainer(BasicTrainer):
     def prepare_dataloader(self, **kwargs):
         """
         Prepare dataloader.
+        均衡可恢复采样 + 多进程 DataLoader；collate 阶段按 batch_split 切分。
         """
         self.data_sampler = BalancedResumableSampler(
             self.dataset,
@@ -101,6 +114,8 @@ class PbrVaeTrainer(BasicTrainer):
         self.data_iterator = cycle(self.dataloader)
         
     def _randomize_camera(self, num_samples: int):
+        # 随机相机：半径按 1/r^2 均匀采样，fov = 2·asin(0.5/r) 保证物体占满视野；
+        # 相机看向原点、up 轴 +z；near 在 [r-1, r] 内随机
         # sample radius and fov
         r_min, r_max = self.camera_randomization_config['radius_range']
         k_min = 1 / r_max**2
@@ -137,9 +152,11 @@ class PbrVaeTrainer(BasicTrainer):
                 metallic : [N x 1 x H x W] tensor of metallic.
                 roughness : [N x 1 x H x W] tensor of roughness.
                 alpha : [N x 1 x H x W] tensor of alpha.
+        返回按通道拆开的属性渲染结果：base_color 3 通道，metallic/roughness/alpha 各 1 通道。
         """
         ret = {k : [] for k in ['base_color', 'metallic', 'roughness', 'alpha']}
         for i, rep in enumerate(reps):
+            # 逐样本设 near/far（far = near + 2），返回材质属性图
             self.renderer.rendering_options['near'] = near[i]
             self.renderer.rendering_options['far'] = near[i] + 2
             out_dict = self.renderer.render(rep, extrinsics[i], intrinsics[i], return_types=['attr'])
@@ -167,12 +184,14 @@ class PbrVaeTrainer(BasicTrainer):
             may also contain other keys for different terms.
 
         """
+        # 编码：重参数化采样并返回 mean/logvar；解码得到重建的属性稀疏张量
         z, mean, logvar = self.training_models['encoder'](x, sample_posterior=True, return_raw=True)
         y = self.training_models['decoder'](z)
         
         terms = edict(loss = 0.0)
         
         # direct regression
+        # 直接回归：只在稀疏张量的 feats 上算 l1/l2
         if self.loss_type == 'l1':
             terms["l1"] = l1_loss(x.feats, y.feats)
             terms["loss"] = terms["loss"] + terms["l1"]
@@ -183,7 +202,10 @@ class PbrVaeTrainer(BasicTrainer):
             raise ValueError(f'Invalid loss type {self.loss_type}')
         
         # rendering loss
+        # 渲染监督：把预测 feats 反归一化（*0.5+0.5）并按 layout 语义包成带材质网格，
+        # 用同一组随机相机分别渲染 GT 与重建，比较 base_color 与 MRA（SSIM+LPIPS）
         if self.lambda_render != 0.0:
+            # layout 指定 feats 各通道的语义：0:3 基色、3 metallic、4 roughness、5 alpha
             recon = [MeshWithVoxel(
                 m.vertices,
                 m.faces,
@@ -215,6 +237,7 @@ class PbrVaeTrainer(BasicTrainer):
                                                 self.lambda_ssim * terms['render/mra/ssim'] + self.lambda_lpips * terms['render/mra/lpips'])
             
         # KL regularization
+        # KL 正则：约束后验接近标准正态
         terms["kl"] = 0.5 * torch.mean(mean.pow(2) + logvar.exp() - logvar - 1)
         terms["loss"] = terms["loss"] + self.lambda_kl * terms["kl"]
             
@@ -234,9 +257,10 @@ class PbrVaeTrainer(BasicTrainer):
             num_workers=1,
             collate_fn=self.dataset.collate_fn if hasattr(self.dataset, 'collate_fn') else None,
         )
-        dataloader.dataset.with_mesh = True
+        dataloader.dataset.with_mesh = True   # 快照需要 GT 网格来渲染对比
 
         # inference
+        # eval 模式下编码（取后验均值）-> 解码 -> 包回带材质网格，随后渲染对比
         gts = []
         recons = []
         self.models['encoder'].eval()
@@ -267,6 +291,7 @@ class PbrVaeTrainer(BasicTrainer):
         self.models['encoder'].train()
         self.models['decoder'].train()
         
+        # 渲染 GT / 重建的 base_color 与 MRA；*2-1 把 [0,1] 映射回 [-1,1] 便于统一可视化
         cameras = self._randomize_camera(num_samples)
         gt_renders = self._render_batch(gts, **cameras)
         pred_renders = self._render_batch(recons, **cameras)

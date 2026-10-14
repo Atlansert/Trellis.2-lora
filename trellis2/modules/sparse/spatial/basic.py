@@ -1,3 +1,10 @@
+"""稀疏空间上下采样（池化式，非通道重排）。
+
+SparseDownsample：factor 倍下采样，把同一父块内的子体素特征做 mean/max 池化，
+坐标 = 子坐标 // factor；SparseUpsample 是其逆（最近邻复制，每个父体素的特征复制给子体素）。
+两者同样通过 _spatial_cache 配对；无缓存时上采样需外部传入 subdivision。
+"""
+
 from typing import *
 import torch
 import torch.nn as nn
@@ -14,6 +21,7 @@ class SparseDownsample(nn.Module):
     Downsample a sparse tensor by a factor of `factor`.
     Implemented as average pooling.
     """
+    # 输出 coords 为父坐标，feats 为父块内子体素特征的池化结果
     def __init__(self, factor: int, mode: Literal['mean', 'max'] = 'mean'):
         super(SparseDownsample, self).__init__()
         self.factor = factor
@@ -25,6 +33,7 @@ class SparseDownsample(nn.Module):
         if cache is None:
             DIM = x.coords.shape[-1] - 1
 
+            # 父坐标 = 子坐标 // factor；再把 4 列坐标编码成整数 code 后 unique 去重
             coord = list(x.coords.unbind(dim=-1))
             for i in range(DIM):
                 coord[i+1] = coord[i+1] // self.factor
@@ -43,6 +52,7 @@ class SparseDownsample(nn.Module):
             new_coords, idx = cache
             
         new_feats = torch.scatter_reduce(
+            # idx 为每个原点对应的父体素下标：按 idx 做 mean/max 池化
             torch.zeros(new_coords.shape[0], x.feats.shape[1], device=x.feats.device, dtype=x.feats.dtype),
             dim=0,
             index=idx.unsqueeze(1).expand(-1, x.feats.shape[1]),
@@ -73,6 +83,7 @@ class SparseUpsample(nn.Module):
     Upsample a sparse tensor by a factor of `factor`.
     Implemented as nearest neighbor interpolation.
     """
+    # 每个父体素的 feats 直接复制给其所有（已在 subdivision 中标记的）子体素
     def __init__(
         self, factor: int
     ):
@@ -101,7 +112,7 @@ class SparseUpsample(nn.Module):
             
         new_feats = x.feats[idx]
         out = SparseTensor(new_feats, new_coords, x._shape)
-        out._scale = tuple([s / self.factor for s in x._scale])
+        out._scale = tuple([s / self.factor for s in x._scale])  # 尺度变小（体素变细）
         if cache is not None:           # only keep cache when subdiv following it
             out._spatial_cache = x._spatial_cache
         

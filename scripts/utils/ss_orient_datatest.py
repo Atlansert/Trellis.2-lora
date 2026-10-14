@@ -11,6 +11,9 @@
 若长轴落在 y 或 x，说明 SS 预测本身就把车转倒了——下游无法用全局变换救回。
 
 用法: ss_orient_datatest.py [--images 001 002 003 004]
+
+输出：stdout 对照表（条件编码器 × SS 权重 × 图片 → 体素数/跨度/长轴）。
+安全边界：只读权重与 data_test/*.png，不写任何文件；需 GPU（默认卡 7）。
 """
 import os
 import sys
@@ -49,6 +52,7 @@ SS_CKS = [
 
 
 def occ_of(coords, swap=False):
+    """把 SS 输出的 coords(N,4)=(b,d,h,w) 反填成 64³ 布尔占据体；swap=True 时把 h/w 对调（y/z 交换）。"""
     c = coords.copy()
     if swap:
         c = c[:, [0, 1, 3, 2]]
@@ -59,6 +63,7 @@ def occ_of(coords, swap=False):
 
 
 def describe(occ):
+    """返回 (体素数, 三轴跨度, 最长轴)；空占据体返回 (0,(0,0,0),'-')。"""
     nz = np.argwhere(occ)
     if len(nz) == 0:
         return (0, (0, 0, 0), '-')
@@ -67,6 +72,7 @@ def describe(occ):
 
 
 def main():
+    """对每张测试图 × 两种条件口径 × (base + 多个 SS LoRA)：只跑 SS 采样，打印占据体朝向，快速判断是否转倒。"""
     ap = argparse.ArgumentParser()
     ap.add_argument('--images', nargs='+', default=['001', '002', '003', '004'])
     a = ap.parse_args()
@@ -76,6 +82,7 @@ def main():
     ss = pipe.models['sparse_structure_flow_model']
 
     def sample(cond):
+        """按固定种子(42)采样 SS，返回 coords（保证同一条件下可复现）。"""
         torch.manual_seed(SEED)
         return pipe.sample_sparse_structure(cond, 64, 1, dict(P_INFER)).cpu().numpy()
 

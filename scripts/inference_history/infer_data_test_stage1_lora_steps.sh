@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：Stage1 SS LoRA 扫 31000..39000（每 1000 一档，Stage2 保持预训练），对 data_test 全量推理，固定 GPU 7。
+# 用法：bash scripts/inference_history/infer_data_test_stage1_lora_steps.sh（无参数）。
+# 输出：results_infer/data_test_stage1_lora_stage2_pretrained_1024/step0NNNNN/（每档 8 个 GLB），总日志在上级 run.log。
+# 边界：会 mkdir 输出目录并跑 GPU 推理（--no_video）；缺权重退 2，某档 GLB 不足 8 个退 3。
 set -euo pipefail
 
 # Resolve the physical workspace path.  The workspace is also mounted at

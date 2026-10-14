@@ -11,6 +11,10 @@
 用法：
   python scripts/utils/render_new_data.py --root new_data_staged \
       --gpus 5,6,7 --workers-per-gpu 2 --transparent
+
+输出：在各单元目录写 24 张视角图 + transforms.json，日志写 <root>/_logs/<unit>.log，
+      失败清单写 <root>/_failed.txt；退出码非 0 表示有失败单元。
+安全边界：只读网格，会覆盖/新增各单元目录内的渲染产物（--overwrite 强制重渲）；用本地 Blender，不 sudo、不下载。
 """
 import os
 import sys
@@ -27,6 +31,7 @@ LABELS = [f'cam_{y:03d}' for y in range(0, 360, 15)]
 
 
 def is_done(unit_dir):
+    """完成判据：transforms.json 存在且 24 张视角图齐全（用于断点续跑）。"""
     if not os.path.exists(os.path.join(unit_dir, 'transforms.json')):
         return False
     return all(os.path.exists(os.path.join(unit_dir, f'{i:03d}_{lab}.png'))
@@ -34,6 +39,7 @@ def is_done(unit_dir):
 
 
 def find_mesh(unit_dir):
+    """在单元目录里找第一个 glb/obj（不区分大小写扩展名），找不到返回 None。"""
     for ext in ('*.glb', '*.GLB', '*.obj', '*.OBJ'):
         g = sorted(glob.glob(os.path.join(unit_dir, ext)))
         if g:
@@ -42,6 +48,9 @@ def find_mesh(unit_dir):
 
 
 def render_one(unit, root, gpu, resolution, transparent, logdir, timeout, overwrite):
+    """渲染单个单元：已完成的跳过（除非 overwrite），Blender 以 -b 后台跑 render_view.py。
+    返回 (单元名, 状态, 耗时秒)；状态含 ok/skipped/no-mesh/failed/timeout/error。
+    """
     unit_dir = os.path.join(root, unit)
     mesh = find_mesh(unit_dir)
     if mesh is None:
@@ -56,7 +65,7 @@ def render_one(unit, root, gpu, resolution, transparent, logdir, timeout, overwr
     if transparent:
         cmd.append('--transparent')
     env = dict(os.environ)
-    env['CUDA_VISIBLE_DEVICES'] = str(gpu)
+    env['CUDA_VISIBLE_DEVICES'] = str(gpu)   # 每个 Blender 进程只暴露一张物理卡
     log = os.path.join(logdir, unit + '.log')
     t0 = time.time()
     try:
@@ -74,6 +83,9 @@ def render_one(unit, root, gpu, resolution, transparent, logdir, timeout, overwr
 
 
 def main():
+    """扫描 --root 下的单元 -> 按 GPU×每卡进程数分配槽位 -> 多线程并发渲染 -> 失败重试若干轮。
+    成功与否以"返回码 0 且 24 张图齐全"为准；返回码 0=全成功、1=有失败单元。
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument('--root', required=True)
     ap.add_argument('--gpus', default='5,6,7')

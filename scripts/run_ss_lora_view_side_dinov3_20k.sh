@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：Stage1（SS）LoRA 训练，移植 TRELLIS.1 的逐视角方案（每图配自己的帧，只留侧视 ≥3.5），20k 步。
+# 用法：bash scripts/run_ss_lora_view_side_dinov3_20k.sh [GPU 号，默认 7]；从原厂权重开始，不续已有 LoRA。
+# 输出：results/multiview_1186_ss_flow_lora_64_views_side/。
+# 边界：长跑 GPU 训练任务，持续写该输出目录；只读 training_data/ 与 configs/。
 # 移植 TRELLIS.1 的逐视角方案，按 TRELLIS.2 的底座改了三处（2026-10-12）：
 #   1. latent 用修正相机轴之后的逐视角数据 ss_latents_views_canon，每张图配自己的帧
 #   2. 条件是 DINOv3@512、crop_scale 1.0，与推理 preprocess_image 一致

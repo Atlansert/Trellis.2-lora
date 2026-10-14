@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""校验暂存区 GLB 是否为有效且非空的 glTF 二进制（含 mesh）。"""
+"""校验暂存区 GLB 是否为有效且非空的 glTF 二进制（含 mesh）。
+
+CLI: validate_glb.py [--root /data/lzx/TRELLIS.2/new_data_staged]
+输出：stdout 统计（有效数、无效原因、无贴图清单）+ 在 --root 下写 _valid_units.txt（有效单元名，会覆盖旧文件）。
+安全边界：只读各单元的 mesh_textured_pbr.glb，除该清单外不写任何文件；不加载权重、不跑 GPU。
+"""
 import os
 import sys
 import json
@@ -8,7 +13,7 @@ import argparse
 
 
 def probe_glb(path):
-    """返回 (ok, reason, info)。"""
+    """返回 (ok, reason, info)。检查 GLB 头(magic/声明长度)、首个 JSON 块，并要求至少一个 mesh primitive。"""
     size = os.path.getsize(path)
     with open(path, 'rb') as f:
         head = f.read(12)
@@ -40,6 +45,7 @@ def probe_glb(path):
 
 
 def main():
+    """遍历 --root 下每个单元目录并校验其 mesh_textured_pbr.glb，打印无效项/无贴图项，最后导出有效清单。"""
     ap = argparse.ArgumentParser()
     ap.add_argument('--root', default='/data/lzx/TRELLIS.2/new_data_staged')
     a = ap.parse_args()

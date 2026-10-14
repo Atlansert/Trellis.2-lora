@@ -4,6 +4,14 @@ No migration of legacy files. No overwrite/cleanup: interrupted files are kept
 as evidence; save into a new run directory after a partial write. Files are
 atomic individually, not a multi-file transaction: only the final marker makes
 a group visible. Rank0 RNG is not a DDP/prefetched-worker exact-resume promise.
+
+LoRA 微调实验的检查点契约（同步、以“完成标记”为准）：
+- 一组检查点 = 若干 <name>_stepNNNNNNN.pt 文件 + 一个 complete_stepNNNNNNN.json 标记；
+  只有标记写成功，该 step 才算提交完成。
+- 单个文件写临时文件后 os.replace 保证原子；整组不是事务，中途失败会保留残留文件作为证据，
+  因此不允许就地重写同一 step，须换新的 run 目录。
+- 每个文件记录 size + sha256 以便校验；validate_checkpoint 会核对 schema/step/文件名/大小/哈希。
+- RNG 状态只保存 rank0，不承诺 DDP 或 dataloader worker 的精确复现。
 """
 import copy
 import hashlib
@@ -21,6 +29,7 @@ SCHEMA = 'trellis.checkpoint-group.v1'
 
 
 def marker_name(step):
+    """完成标记文件名（7 位零填充），非法 step 直接报错。"""
     if isinstance(step, bool) or not isinstance(step, int) or step < 0:
         raise ValueError('step must be nonnegative integer')
     return f'complete_step{step:07d}.json'
@@ -84,6 +93,7 @@ def atomic_save_group(ckpt_dir, step, payloads, metadata=None, non_blocking=True
     if any(p.exists() for p in targets):
         raise FileExistsError('checkpoint group targets already exist; preserve old/partial files and use a new run directory')
     lock = directory / f'.checkpoint_step{step:07d}.reservation'
+    # 预约文件用 'x' 独占创建，避免同一 step 被并发写；失败时故意保留
     with open(lock, 'x', encoding='utf-8') as f:
         f.write('synchronous writer; do not retry this step in-place after failure\n')
         f.flush()
@@ -101,7 +111,7 @@ def atomic_save_group(ckpt_dir, step, payloads, metadata=None, non_blocking=True
             os.fsync(f.fileno())
         if path.exists():
             raise FileExistsError(f'checkpoint target appeared while saving: {path}')
-        os.replace(tmp, path)
+        os.replace(tmp, path)  # 原子替换：写完临时文件再改名
         files.append({'name': name, 'size_bytes': path.stat().st_size, 'sha256': _hash(path)})
     _fsync_dir(directory)
     manifest = {'schema': SCHEMA, 'step': step, 'files': files,
@@ -123,6 +133,7 @@ save_checkpoint_group = atomic_save_group
 
 
 def validate_checkpoint(ckpt_dir, step, verify_hashes=True):
+    """校验某 step 的完成标记与文件：schema/step、文件名、大小与（可选）sha256。"""
     directory = Path(ckpt_dir)
     marker = directory / marker_name(step)
     if not marker.is_file():
@@ -151,6 +162,7 @@ validate_complete_checkpoint = validate_checkpoint
 
 
 def list_complete_steps(ckpt_dir, verify_hashes=False):
+    """列出目录下所有已提交完成的 step（逐个校验标记，返回升序去重结果）。"""
     directory = Path(ckpt_dir)
     steps = []
     if not directory.exists():
@@ -165,6 +177,7 @@ def list_complete_steps(ckpt_dir, verify_hashes=False):
     return sorted(set(steps))
 
 
+# LoRA 场景：只把非 LoRA 主体转成目标 dtype，LoRA 适配器保持 FP32 且 Parameter 身份不变
 def cast_model_preserving_lora_and_complex(model, dtype):
     """Cast non-LoRA base as before; retain exact FP32 adapters and complex buffers.
 
@@ -196,6 +209,7 @@ def cast_model_preserving_lora_and_complex(model, dtype):
             original_param.data = data.to(device=original_param.device, dtype=torch.float32)
 
 
+# 优化器状态里的浮点张量（动量等）对齐到参数自身的 device/dtype，step 保持标量
 def align_optimizer_moments(optimizer):
     """Floating tensor moments match owning parameter; scalar step stays scalar."""
     for param, state in optimizer.state.items():
@@ -205,6 +219,7 @@ def align_optimizer_moments(optimizer):
 
 
 def capture_rng_state(rank=0, world_size=1):
+    """抓取当前 RNG 状态（python/numpy/torch CPU 及可用的 CUDA），仅供 rank0。"""
     state = {'python': random.getstate(), 'numpy': np.random.get_state(),
              'torch_cpu': torch.get_rng_state().clone(), 'rank': rank,
              'world_size': world_size,
@@ -215,6 +230,7 @@ def capture_rng_state(rank=0, world_size=1):
 
 
 def restore_rng_state(state, rank=0, world_size=1):
+    """恢复 RNG；rank/world_size 或 CUDA 设备数不匹配时给警告并降级返回 False。"""
     if state is None:
         warnings.warn('Legacy checkpoint has no RNG state; resume is not exact', RuntimeWarning)
         return False
@@ -235,6 +251,7 @@ def restore_rng_state(state, rank=0, world_size=1):
 
 
 def snapshot_allowed(dataset, final=False):
+    """是否允许做快照；dataset.skip_snapshot=True 时跳过（latent 代理不等于几何验收）。"""
     if getattr(dataset, 'skip_snapshot', False):
         if final:
             print('Skipping final snapshot: dataset.skip_snapshot=True (latent proxy is not geometry acceptance).', flush=True)

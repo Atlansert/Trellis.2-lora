@@ -4,6 +4,9 @@
 做法：把 base 的输出取"壳"（occupancy & ~erode(occupancy)），与修正后 GT 的壳
 在 3D 上比 IoU —— 这样是壳比壳，不受"壳 vs 实心"的影响。
 对轴置换 p=(2,0,1)（已由剪影/跨度确认为唯一循环解）逐一试 8 种符号组合。
+
+运行：无参数；需 GPU（默认卡 5），脚本内已 chdir 到项目根，ROOT/PERM 为常量。
+安全边界：只读 GT npz、renders_cond 图与 base 权重，不写任何文件；纯标定实验。
 """
 import os
 import sys
@@ -33,24 +36,29 @@ SIGNS = list(itertools.product([1, -1], repeat=3))
 
 
 def shell(o):
+    """取表面壳：占据体减去自身的腐蚀结果。让"壳 vs 壳"可比，避开壳/实心的口径差。"""
     return o & ~ndimage.binary_erosion(o)
 
 
 def main():
+    """对 24 个对象 × 6 个视角：base 采样的壳 与 8 种符号组合下的 GT 壳 比 IoU，按均值排序输出。"""
     pipe = Trellis2ImageTo3DPipeline.from_pretrained('checkpoints')
     pipe.cuda()
     objs = sorted(os.listdir(f'{ROOT}/{VOX}'))[:N_OBJ]
     acc = {s: [] for s in SIGNS}
 
     def gt_shell(path, s):
+        """读 GT 体素，按 PERM 重排轴，再按符号组合 s 做镜像，返回 GT 的占据体（未取壳，外层统一比壳）。"""
         c = np.load(path)['coords'].astype(np.int64)
         c = c[:, PERM]
+        # 负号轴做坐标镜像：c * s + 63 把 [0,63] 区间整体翻转。
         c = (c * np.array(s) + (np.array(s) < 0) * 63)
         x = np.zeros((64, 64, 64), bool)
         x[np.clip(c[:, 0], 0, 63), np.clip(c[:, 1], 0, 63), np.clip(c[:, 2], 0, 63)] = True
         return x
 
     def iou(a, b):
+        """体素 IoU；两者都空时定义为 0。"""
         u = (a | b).sum()
         return float((a & b).sum()) / u if u else 0.0
 

@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：Stage-2b：Shape Flow 512 LoRA 训练（1024_cascade / 1536_cascade 缺的那段 LR），固定 GPU 4。
+# 用法：bash scripts/run_stage2_512_lora.sh（无参数）；训练在预编码好的 512 shape latent 上。
+# 输出：results/multiview_1186_flow_512_lora/（checkpoint、log）。
+# 边界：长跑 GPU 训练任务，持续写该输出目录；配方与 1024 v2 一致（r8/a8、仅 attention、EMA 0.9999、lr 1e-4）。
 # Stage-2b: Shape Flow 512 LoRA — the missing LR stage for 1024_cascade /
 # 1536_cascade pipelines. Same recipe as the 1024 v2 run (rank8/alpha8,
 # attention-only, EMA 0.9999, logitNormal(1,1), p_uncond 0.1, lr 1e-4).

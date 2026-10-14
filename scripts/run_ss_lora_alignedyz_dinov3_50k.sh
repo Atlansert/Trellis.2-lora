@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：Stage1（SS）LoRA 训练，目标用"已做 y/z 对齐"的逐视角 latent + DINOv3@512，50k 步。
+# 用法：bash scripts/run_ss_lora_alignedyz_dinov3_50k.sh [GPU 号，默认 5]；需 conda 环境 trellis2 的 python。
+# 输出：results/multiview_1186_ss_flow_lora_64_views_alignedyz/（checkpoint、log.txt）。
+# 边界：长跑 GPU 训练任务，会持续写上面那个输出目录；只读 training_data/ 与 configs/；脚本内先 cd 到仓库根再 exec train.py。
 # Stage1 SS LoRA —— **已做 y/z 对齐**的逐视角目标 + DINOv3@512，50k 步。
 #
 # 目标数据 ss_latents_views_mesh_t1_yz 由 data_toolkit/encode_ss_view_latents_yz.py

@@ -20,6 +20,7 @@ import numpy as np
 from PIL import Image
 
 
+# 计算 alpha 掩码的宽高比（前景像素数不足 8 时返回 0），用于挑“最侧视”的帧。
 def aspect(path):
     a = np.array(Image.open(path).convert('RGBA').getchannel('A').resize((128, 128), Image.BOX))
     ys, xs = np.nonzero(a > 32)
@@ -28,6 +29,8 @@ def aspect(path):
     return (xs.max() - xs.min() + 1) / max(1, ys.max() - ys.min() + 1)
 
 
+# 单对象任务：在渲染图里取宽高比最大（最侧视）的视角，把该视角 latent 另存为目标；
+# 找不到对应视角时退回到任一存在的视角。返回 (对象名, 视角号, 错误信息)。
 def one(job):
     root, obj, src, dst = job
     rp = sorted(glob.glob(os.path.join(root, 'renders_cond_t', obj, '*.png')))
@@ -49,6 +52,7 @@ def one(job):
     return obj, v, ''
 
 
+# CLI 入口：--root 数据根目录、--src 逐视角 latent 目录、--output_name 输出子目录、--workers 进程数。
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--root', default='training_data/multiview_1186')

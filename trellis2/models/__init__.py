@@ -1,5 +1,14 @@
+"""TRELLIS.2 模型包入口：按名字懒加载各子模块中的模型类。
+
+关键约定：
+- __attributes 把对外暴露的类名映射到所属子模块，import 时才真正加载（避免全量依赖）。
+- from_pretrained 读取 <path>.json(结构) + <path>.safetensors(权重)，缺一即报错，不做静默回退。
+- 检查点严格校验：缺失/多余 key 直接抛 CheckpointValidationError；只有 rope_phases
+  这类由配置推出的 buffer 允许重新计算，不被旧权重覆盖。
+"""
 import importlib
 
+# 类名 -> 子模块名 的映射表，配合下方 __getattr__ 实现懒加载
 __attributes = {
     # Sparse Structure
     'SparseStructureEncoder': 'sparse_structure_vae',
@@ -22,6 +31,7 @@ __submodules = []
 __all__ = list(__attributes.keys()) + __submodules
 
 def __getattr__(name):
+    # 首次访问某类名时才 import 对应子模块，并缓存进 globals()
     if name not in globals():
         if name in __attributes:
             module_name = __attributes[name]
@@ -40,7 +50,7 @@ class CheckpointValidationError(RuntimeError):
 
 
 def from_pretrained(path: str, **kwargs):
-    """
+    """从预训练检查点构建模型（本地或 HuggingFace 仓库路径）。
     Load a model from a pretrained checkpoint.
 
     Args:
@@ -75,6 +85,7 @@ def from_pretrained(path: str, **kwargs):
     state = load_file(model_file)
     # Current computed complex RoPE is regenerated from the configured model;
     # do not let an old serialized/real-cast buffer overwrite it.
+    # rope_phases 是按配置重新生成的复数 RoPE 相位缓存，丢弃权重里的旧版本
     buffers = dict(model.named_buffers())
     allowed = {name for name in buffers if name == 'rope_phases'}
     for name in allowed:

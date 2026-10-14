@@ -1,3 +1,10 @@
+"""Dense 注意力模块：MultiHeadRMSNorm + MultiHeadAttention。
+
+MultiHeadAttention 同时支持 self / cross（cross 仅支持 full 模式），可选 qk RMSNorm
+与 RoPE。输入 x: [B, L, C]；self 输出 [B, L, C]；cross 的 context: [B, Lkv, ctx_channels]。
+内部注意力张量布局为 [B, L, H, C/H]（flash-attn 风格）。
+"""
+
 from typing import *
 import torch
 import torch.nn as nn
@@ -7,6 +14,7 @@ from .rope import RotaryPositionEmbedder
 
 
 class MultiHeadRMSNorm(nn.Module):
+    """逐 head 的 RMSNorm：gamma 形状 (heads, head_dim)，在最后一维 L2 归一化后缩放。"""
     def __init__(self, dim: int, heads: int):
         super().__init__()
         self.scale = dim ** 0.5
@@ -17,6 +25,7 @@ class MultiHeadRMSNorm(nn.Module):
     
 
 class MultiHeadAttention(nn.Module):
+    """多头自/交叉注意力；channels 需被 num_heads 整除，head_dim = channels // num_heads。"""
     def __init__(
         self,
         channels: int,
@@ -52,10 +61,10 @@ class MultiHeadAttention(nn.Module):
         self.qk_rms_norm = qk_rms_norm
 
         if self._type == "self":
-            self.to_qkv = nn.Linear(channels, channels * 3, bias=qkv_bias)
+            self.to_qkv = nn.Linear(channels, channels * 3, bias=qkv_bias)  # self: 一次投影出 qkv
         else:
             self.to_q = nn.Linear(channels, channels, bias=qkv_bias)
-            self.to_kv = nn.Linear(self.ctx_channels, channels * 2, bias=qkv_bias)
+            self.to_kv = nn.Linear(self.ctx_channels, channels * 2, bias=qkv_bias)  # cross: q/kv 分离
             
         if self.qk_rms_norm:
             self.q_rms_norm = MultiHeadRMSNorm(self.head_dim, num_heads)
@@ -64,6 +73,7 @@ class MultiHeadAttention(nn.Module):
         self.to_out = nn.Linear(channels, channels)
     
     def forward(self, x: torch.Tensor, context: Optional[torch.Tensor] = None, phases: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # x: [B, L, C]；context 仅 cross 用；phases 为 RoPE 相位（use_rope 时必须给）
         B, L, C = x.shape
         if self._type == "self":
             qkv = self.to_qkv(x)
@@ -71,6 +81,7 @@ class MultiHeadAttention(nn.Module):
             
             if self.attn_mode == "full":
                 if self.qk_rms_norm or self.use_rope:
+                    # 需要逐 head 归一化/旋转，故拆开 q,k,v 单独处理
                     q, k, v = qkv.unbind(dim=2)
                     if self.qk_rms_norm:
                         q = self.q_rms_norm(q)
@@ -89,7 +100,7 @@ class MultiHeadAttention(nn.Module):
             q = self.to_q(x)
             kv = self.to_kv(context)
             q = q.reshape(B, L, self.num_heads, -1)
-            kv = kv.reshape(B, Lkv, 2, self.num_heads, -1)
+            kv = kv.reshape(B, Lkv, 2, self.num_heads, -1)  # [B, Lkv, 2, H, C/H]
             if self.qk_rms_norm:
                 q = self.q_rms_norm(q)
                 k, v = kv.unbind(dim=2)
@@ -98,5 +109,5 @@ class MultiHeadAttention(nn.Module):
             else:
                 h = scaled_dot_product_attention(q, kv)
         h = h.reshape(B, L, -1)
-        h = self.to_out(h)
+        h = self.to_out(h)  # 输出投影回 C 维
         return h

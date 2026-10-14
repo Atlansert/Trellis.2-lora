@@ -1,3 +1,9 @@
+"""低差异序列工具：用 Hammersley/Halton 生成均匀分布的采样点。
+
+- radical_inverse 是 Halton 序列的基础（按 base 做进制反转）。
+- sphere_hammersley_sequence 把 2D Hammersley 点映射成球面角度，返回 [phi, theta]：
+  phi 为绕 Z 轴的方位角（0~2π），theta 为相对赤道的俯仰角，即 render_utils 里用的 yaw/pitch。
+"""
 import numpy as np
 
 PRIMES = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53]

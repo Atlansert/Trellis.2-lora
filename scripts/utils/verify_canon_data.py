@@ -9,6 +9,10 @@
 
 latent 轴语义（已对齐到管线约定，轴置换 (2,0,1) 之后）：
   index0 = 竖直、index1 = 长度(画面水平)、index2 = 视深
+
+CLI: [--root training_data/multiview_1186] [--latent ss_latents_views_canon] [--n_obj 40] [--views 8]
+输出：stdout 的相关系数与"长轴是否随视角变化"的统计。
+安全边界：只读 latent npz 与渲染图，不写文件；需可加载管线的 GPU 环境（默认卡 5），但 SS 解码器在本脚本中放到 CPU 跑。
 """
 import argparse
 import glob
@@ -28,6 +32,9 @@ from trellis2.pipelines import Trellis2ImageTo3DPipeline
 
 
 def main():
+    """抽样对象/视角：比较渲染剪影宽高比 与 latent 解码占据体的 E1/E0，
+    并统计"长轴在各视角始终同一根轴"的对象数，判断规范化是否生效。
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument('--root', default='training_data/multiview_1186')
     ap.add_argument('--latent', default='ss_latents_views_canon')

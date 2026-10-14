@@ -1,3 +1,10 @@
+"""稀疏 RoPE：位置不再是序号，而是直接用 coords 里的体素坐标 (x, y, z) 生成相位。
+
+每个坐标维分配 freq_dim = head_dim/2/dim 个频率；相位按 coords 计算后缓存在
+spatial_cache 中（键包含 dim/频率/head_dim），同一坐标集的 q、k 复用同一份相位。
+不足 head_dim/2 的部分相位补 1+0j（不旋转）。
+"""
+
 from typing import *
 import torch
 import torch.nn as nn
@@ -5,6 +12,7 @@ from ..basic import SparseTensor
 
 
 class SparseRotaryPositionEmbedder(nn.Module):
+    """由 SparseTensor 的 coords 生成 RoPE 相位并作用于 q/k 的 feats。"""
     def __init__(
         self, 
         head_dim: int,
@@ -42,7 +50,7 @@ class SparseRotaryPositionEmbedder(nn.Module):
         phases_cache_name = f'rope_phase_{self.dim}d_freq{self.rope_freq[0]}-{self.rope_freq[1]}_hd{self.head_dim}'
         phases = q.get_spatial_cache(phases_cache_name)
         if phases is None:
-            coords = q.coords[..., 1:]
+            coords = q.coords[..., 1:]  # 去掉 batch 列，只留 (x, y, z)
             phases = self._get_phases(coords.reshape(-1)).reshape(*coords.shape[:-1], -1)
             if phases.shape[-1] < self.head_dim // 2:
                 padn = self.head_dim // 2 - phases.shape[-1]
@@ -54,5 +62,5 @@ class SparseRotaryPositionEmbedder(nn.Module):
         q_embed = q.replace(self._rotary_embedding(q.feats, phases))
         if k is None:
             return q_embed
-        k_embed = k.replace(self._rotary_embedding(k.feats, phases))
+        k_embed = k.replace(self._rotary_embedding(k.feats, phases))  # k 与 q 共用相位（坐标集合相同）
         return q_embed, k_embed

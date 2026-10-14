@@ -1,4 +1,11 @@
-"""Small, dependency-free LoRA implementation for TRELLIS.2 linear layers."""
+"""Small, dependency-free LoRA implementation for TRELLIS.2 linear layers.
+
+LoRA 注入：把目标 nn.Linear 冻结（requires_grad=False），并叠加低秩残差
+lora_up(lora_down(x)) * (alpha/rank)。适配器权重恒为 fp32 以保证小步更新稳定，
+前向时再转回 base 分支的 dtype（AMP/bf16 不受影响）。
+apply_lora_to_linear_layers 按“限定名关键字”匹配替换，TRELLIS.2 的目标层为
+self_attn.to_qkv / self_attn.to_out / cross_attn.to_q / cross_attn.to_kv / cross_attn.to_out。
+"""
 
 from typing import Iterable
 
@@ -19,9 +26,10 @@ class LoRALinear(nn.Module):
         self.out_features = base_layer.out_features
         self.rank = int(rank)
         self.alpha = float(alpha)
-        self.scale = self.alpha / self.rank
+        self.scale = self.alpha / self.rank  # 残差缩放系数 alpha/r
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
+        # 冻结原始权重（含 bias，若存在）
         self.weight = nn.Parameter(base_layer.weight.detach().clone(), requires_grad=False)
         self.bias = None
         if base_layer.bias is not None:
@@ -34,17 +42,18 @@ class LoRALinear(nn.Module):
         self.lora_up = nn.Linear(self.rank, self.out_features, bias=False,
                                  device=base_layer.weight.device, dtype=torch.float32)
         nn.init.kaiming_uniform_(self.lora_down.weight, a=5 ** 0.5)
-        nn.init.zeros_(self.lora_up.weight)
+        nn.init.zeros_(self.lora_up.weight)  # up 置零 => 初始等价于原始线性层
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Pipeline/trainer may keep the frozen base in bfloat16 while adapter
         # matrices stay fp32; align the base branch explicitly for F.linear.
         base = F.linear(x.to(dtype=self.weight.dtype), self.weight, self.bias)
-        update = self.lora_up(self.dropout(self.lora_down(x.float())))
+        update = self.lora_up(self.dropout(self.lora_down(x.float())))  # fp32 低秩分支
         return base + update.to(dtype=base.dtype) * self.scale
 
 
 def _parent(root: nn.Module, name: str):
+    # 按点分限定名取出父模块与子属性名，供 setattr 替换
     parts = name.split('.')
     parent = root
     for part in parts[:-1]:
@@ -56,6 +65,7 @@ def apply_lora_to_linear_layers(model: nn.Module, target_keywords: Iterable[str]
                                 rank: int = 8, alpha: float = 8.0,
                                 dropout: float = 0.0) -> list[str]:
     """Replace matching nn.Linear modules, returning their qualified names."""
+    # target_keywords: 限定名需包含的任一关键字（如 "to_qkv"）；返回被替换的限定名列表
     targets = tuple(target_keywords)
     replaced = []
     modules = list(model.named_modules())
@@ -69,6 +79,7 @@ def apply_lora_to_linear_layers(model: nn.Module, target_keywords: Iterable[str]
             continue
         if isinstance(module, nn.Linear) and any(k in name for k in targets):
             parent, child = _parent(model, name)
+            # 就地替换为 LoRA 包装层（原层参数被克隆进冻结分支）
             setattr(parent, child, LoRALinear(module, rank, alpha, dropout))
             replaced.append(name)
     return replaced

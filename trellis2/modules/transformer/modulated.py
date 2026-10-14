@@ -1,3 +1,10 @@
+"""带调制（adaLN）的 dense Transformer block。
+
+mod: (B, C) 条件嵌入 -> SiLU+Linear -> 6C，切成 msa/mlp 各自的 shift/scale/gate。
+流程：h = norm(x)（norm 无仿射参数），h = h*(1+scale)+shift，过 attn/mlp 后乘 gate 回到残差。
+share_mod=True 时用可学习参数 modulation（与 mod 相加）替代单独投影。
+"""
+
 from typing import *
 import torch
 import torch.nn as nn
@@ -10,6 +17,7 @@ class ModulatedTransformerBlock(nn.Module):
     """
     Transformer block (MSA + FFN) with adaptive layer norm conditioning.
     """
+    # x: [B, L, C]；mod: [B, C]
     def __init__(
         self,
         channels: int,
@@ -54,12 +62,13 @@ class ModulatedTransformerBlock(nn.Module):
             self.modulation = nn.Parameter(torch.randn(6 * channels) / channels ** 0.5)
 
     def _forward(self, x: torch.Tensor, mod: torch.Tensor, phases: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # 6 组调制量：shift/scale/gate × (msa, mlp)
         if self.share_mod:
             shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (self.modulation + mod).type(mod.dtype).chunk(6, dim=1)
         else:
             shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(mod).chunk(6, dim=1)
         h = self.norm1(x)
-        h = h * (1 + scale_msa.unsqueeze(1)) + shift_msa.unsqueeze(1)
+        h = h * (1 + scale_msa.unsqueeze(1)) + shift_msa.unsqueeze(1)  # (B, C) -> (B, 1, C)，按 token 维广播
         h = self.attn(h, phases=phases)
         h = h * gate_msa.unsqueeze(1)
         x = x + h
@@ -81,6 +90,7 @@ class ModulatedTransformerCrossBlock(nn.Module):
     """
     Transformer cross-attention block (MSA + MCA + FFN) with adaptive layer norm conditioning.
     """
+    # 比 ModulatedTransformerBlock 多一个 norm2+cross_attn 段，该段不做 adaLN 调制
     def __init__(
         self,
         channels: int,
@@ -148,7 +158,7 @@ class ModulatedTransformerCrossBlock(nn.Module):
         h = h * gate_msa.unsqueeze(1)
         x = x + h
         h = self.norm2(x)
-        h = self.cross_attn(h, context)
+        h = self.cross_attn(h, context)  # cross 段：context 作 K/V，无调制
         x = x + h
         h = self.norm3(x)
         h = h * (1 + scale_mlp.unsqueeze(1)) + shift_mlp.unsqueeze(1)

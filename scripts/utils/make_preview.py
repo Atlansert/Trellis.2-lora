@@ -1,4 +1,8 @@
-"""把一组渲染图拼成小尺寸 JPEG 预览图（用于把远端结果带回本地目视检查）。"""
+"""把一组渲染图拼成小尺寸 JPEG 预览图（用于把远端结果带回本地目视检查）。
+
+CLI: --src 渲染图目录 --out 输出.jpg [--idx 0,6,12,18] [--tile 384] [--quality 72]
+输出：单个 JPEG（按 --idx 选视角，2 列排布）；只读 --src 下的 *_cam_*.png，只写 --out，目录无图则返回 1。
+"""
 import sys
 import glob
 import argparse
@@ -8,6 +12,7 @@ from PIL import Image
 
 
 def main():
+    """按 --idx 挑视角、统一深色底并缩放到 --tile，2 列拼成一张 JPEG；无输入图返回 1。"""
     ap = argparse.ArgumentParser()
     ap.add_argument('--src', required=True, help='渲染图目录')
     ap.add_argument('--out', required=True)

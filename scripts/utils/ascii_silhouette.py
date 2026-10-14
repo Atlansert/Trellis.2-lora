@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """把渲染图降采样成 ASCII 剪影，便于在无法传图时可靠核对形状。
 
-用法: ascii_silhouette.py <渲染目录> [视角下标...]
+用法: ascii_silhouette.py <渲染目录> [视角下标...]   （不给下标时默认 0,6,12,18）
+输出：直接打到 stdout 的 ASCII 图（silhouette 看 alpha 轮廓，gray_ascii 看涂装亮度）。
+安全边界：只读目录下的 *_cam_*.png，不写任何文件；越界的视角下标自动跳过。
 """
 import sys
 import glob
@@ -14,6 +16,7 @@ CHARS = ' .:-=+*#%@'
 
 
 def silhouette(path, cols=104, rows=26):
+    """把图片 alpha 通道降采样成 ASCII 剪影（按字符宽高比 2:1），返回 (行文本列表, alpha 覆盖率)。"""
     im = Image.open(path).convert('RGBA')
     a = np.array(im)[:, :, 3].astype(np.float32) / 255
     # 按字符宽高比 2:1 采样
@@ -50,6 +53,7 @@ def gray_ascii(path, cols=104, rows=26):
 
 
 def main():
+    """读 <渲染目录>/*_cam_*.png，按给定视角下标打印剪影与 alpha 覆盖率；越界下标跳过。"""
     d = sys.argv[1]
     idxs = [int(x) for x in sys.argv[2:]] or [0, 6, 12, 18]
     pngs = sorted(glob.glob(os.path.join(d, '*_cam_*.png')))

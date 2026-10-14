@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：严格 T1 管线串跑：等指定 PID 的网格体素化结束 → 校验体素 14184 个 → 编码逐视角 latent 并校验 14184 个 →
+#       在 GPU 7 启动 SS LoRA 训练（config ss_flow_lora_64_views_train）。
+# 用法：bash scripts/training_history/run_strict_t1_lora_pipeline.sh <prep_pid>（需在仓库根下执行）。
+# 输出：results/strict_t1_pipeline_status.log、results/strict_t1_encode.log；训练写 results/multiview_1186_ss_flow_lora_64_views/。
+# 边界：会写上述日志并启动长跑训练；体素数不等于 14184 退 2，latent 数不等于 14184 退 3。
 set -euo pipefail
 ROOT="training_data/multiview_1186"
 VOX="ss_view_voxels_mesh_t1"

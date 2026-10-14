@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：Stage-1（SS）LoRA 训练（TRELLIS.1 风格逐视角监督，数据 ss_latents_views_v2），固定 GPU 7；
+#       训练前先用内嵌 Python 校验数据：1182 个对象、每对象 24 对图/latent 且渲染图齐全，不满足直接失败退出。
+# 用法：bash scripts/training_history/run_ss_lora_64.sh（无参数，需 conda 环境 trellis2 的 python）。
+# 输出：results/multiview_1186_ss_flow_lora_64_trellis1_views/（checkpoint、log）。
+# 边界：长跑 GPU 训练任务，持续写该输出目录；校验只读 training_data/。
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PY="/home/test/miniconda3/envs/trellis2/bin/python"

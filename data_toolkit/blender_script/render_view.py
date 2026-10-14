@@ -13,6 +13,16 @@ Output:
         ...
         023_cam_345.png   # yaw=345°
         transforms.json   # camera parameters
+
+中文说明：
+- 用途：在 Blender 内部渲染 24 个视角（每 15°）的 RGBA 图，并导出相机参数。
+- 调用方式（内部）：blender -b -P render_view.py -- --object model.glb --output_dir /tmp/views
+  [--resolution 1024] [--radius 2.2] [--fov 30] [--transparent] [--gpu N]；由 render_views.py 等外部脚本调用。
+- 输出：{output_dir}/<idx>_cam_<yaw>.png（000_cam_000.png … 023_cam_345.png）与 transforms.json
+  （含 scale/offset/object_path 与逐帧 yaw_deg、camera_angle_x、transform_matrix）。
+- 关键约定：相机在 **XY 平面环绕**（pitch 恒为 0）、以世界 **+Z 为竖直**，且相机 local Y 对齐世界竖直轴——
+  这是下游体素化/轴置换所依赖的渲染帧约定；模型先归一化到 [-0.5,0.5]³ 并居中到原点。
+- 色彩管理显式钉死 Filmic + sRGB（避免 Blender 4.x 默认 AgX 造成色调偏移）。
 """
 import argparse, sys, os, math, json
 import bpy
@@ -83,6 +93,7 @@ def init_render(engine='CYCLES', resolution=1024, gpu=None, transparent=False):
         print(f'[Blender] CUDA device {i}: {device.name} -> {"ON" if device.use else "OFF"}')
 
 
+# 相机始终注视原点：负 Z 轴指向目标，且相机 local Y（画面竖直方向）对齐世界 Z 轴。
 def init_camera():
     """Create a camera that always looks at origin."""
     cam = bpy.data.objects.new('Camera', bpy.data.cameras.new('Camera'))
@@ -159,6 +170,7 @@ def scene_bbox():
     return Vector(bbox_min), Vector(bbox_max)
 
 
+# 归一化：按最长边缩放使模型落在 [-0.5,0.5]³，再把包围盒中心平移到原点（与其它流水线约定一致）。
 def normalize_scene():
     """Scale and translate scene so model fits in [-0.5, 0.5]³ centered at origin."""
     roots = [obj for obj in bpy.context.scene.objects.values() if not obj.parent]
@@ -193,6 +205,7 @@ def get_transform_matrix(obj):
     return m
 
 
+# 在 Blender 内运行：只解析 `--` 之后的参数（之前的属于 Blender 自身）。
 def main():
     argv = sys.argv[sys.argv.index("--") + 1:]
     parser = argparse.ArgumentParser()
@@ -220,6 +233,7 @@ def main():
     init_render(resolution=args.resolution, gpu=args.gpu, transparent=args.transparent)
 
     # 24 views every 15° (0°, 15°, 30°, ..., 345°)
+    # 中文：相机在 XY 平面环绕（pitch=0），绕世界 Z 轴每 15° 一个视角，共 24 个。
     yaws_deg = list(range(0, 360, 15))
     labels = [f'cam_{yaw:03d}' for yaw in yaws_deg]
 
@@ -243,6 +257,7 @@ def main():
             args.radius * cam_dir[1],
             args.radius * cam_dir[2]
         )
+        # 由水平视场角换算焦距：sensor 宽 32（半宽 16），lens = 16 / tan(fov/2)。
         cam.data.lens = 16 / math.tan(math.radians(args.fov) / 2)
 
         filepath = os.path.join(args.output_dir, f'{i:03d}_{label}.png')

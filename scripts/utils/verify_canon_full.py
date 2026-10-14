@@ -7,6 +7,9 @@
 3. 规范帧 latent：每对象 1 个，解码前用**体素**判定其长度轴是否为 index1
    （规范帧取自最侧视视角，侧视帧的长度轴应落在 index1）
 4. 对照组：旧数据中"latent 长轴对全部视角不变"的对象比例
+
+运行：无参数（ROOT/PERM 为文件内常量，按当前工作目录解析，需在项目根下执行）。
+安全边界：只读体素 npz 与 latent npz，不写任何文件；纯 CPU 统计，不需 GPU。
 """
 import os
 import glob
@@ -20,6 +23,9 @@ PERM = (2, 0, 1)
 
 
 def main():
+    """全量检查体素 v4（文件数/非空/竖直轴波动/长轴一致性）、逐视角与规范帧 latent，
+    并用"最侧视视角体素"判定规范帧 latent 的长度轴是否落在 index1。
+    """
     vox = os.path.join(ROOT, 'ss_view_voxels_canon_v4')
     lv = os.path.join(ROOT, 'ss_latents_views_canon')
     lc = os.path.join(ROOT, 'ss_latents_canon')

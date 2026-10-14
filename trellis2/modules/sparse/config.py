@@ -1,6 +1,14 @@
+"""稀疏后端的全局配置。
+
+CONV：稀疏卷积后端 none/spconv/torchsparse/flex_gemm（默认 flex_gemm，无 CUDA 扩展时用 none）。
+ATTN：稀疏注意力后端 xformers/flash_attn/flash_attn_3。
+导入时从环境变量读取一次：SPARSE_CONV_BACKEND、SPARSE_DEBUG=1、SPARSE_ATTN_BACKEND
+（未设置则回落到通用变量 ATTN_BACKEND）。
+"""
+
 from typing import *
 
-CONV = 'flex_gemm' 
+CONV = 'flex_gemm'  # 默认稀疏卷积后端
 DEBUG = False
 ATTN = 'flash_attn'
 

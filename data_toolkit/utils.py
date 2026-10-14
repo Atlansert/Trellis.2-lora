@@ -1,9 +1,18 @@
+"""通用工具函数：文件哈希、低差异序列（Halton/Hammersley）、PLY 读写、图像拼接与文字标注。
+
+- 用途：被 data_toolkit 其它脚本与渲染/检查脚本共用的纯工具集，无 CLI，按需 import。
+- 输入/输出：文件路径/张量/numpy 图像进，哈希字符串、PLY 张量、numpy 图像出。
+- 关键约定：PLY 只支持 float32 顶点 + 三角形/四边形面，面索引 int32；二进制定为小端；
+  Halton/Hammersley 用固定质数表 PRIMES 构造球面采样，供多视角相机方向使用。
+- 依赖：numpy、cv2、torch（read_ply/write_ply、save_image_with_notes 用到）。
+"""
 from typing import *
 import hashlib
 import numpy as np
 import cv2
 
 
+# 分块计算文件 SHA-256（与 metadata.csv 的 sha256 主键一致）。
 def get_file_hash(file: str) -> str:
     sha256 = hashlib.sha256()
     # Read the file from the path
@@ -17,6 +26,7 @@ def get_file_hash(file: str) -> str:
 
 PRIMES = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53]
 
+# 以 base 为基的根式反函数（van der Corput），是 Halton 序列的单维分量。
 def radical_inverse(base, n):
     val = 0
     inv_base = 1.0 / base
@@ -34,6 +44,7 @@ def halton_sequence(dim, n):
 def hammersley_sequence(dim, n, num_samples):
     return [n / num_samples] + halton_sequence(dim - 1, n)
 
+# 球面准均匀采样：返回 [phi, theta]（方位角、极角）。
 def sphere_hammersley_sequence(n, num_samples, offset=(0, 0)):
     u, v = hammersley_sequence(2, n, num_samples)
     u += offset[0] / num_samples
@@ -48,6 +59,8 @@ import struct
 import re
 import torch
 
+# 读 PLY（ASCII 或 binary_little_endian）：返回 (顶点 [N,3] float32, 三角面 [M,3], 四边面 [K,4])。
+# 只解析 x/y/z 三个 float 属性；非 3/4 边的面会被跳过或直接抛错。
 def read_ply(filename):
     """
     Read a PLY file and return vertices, triangle faces, and quad faces.
@@ -159,6 +172,7 @@ def read_ply(filename):
         return vertices, tris, quads
 
 
+# 写 PLY：ascii=False 时用 binary_little_endian；面按 uchar 计数 + int 索引写出。
 def write_ply(filename, vertices, tris, quads, ascii=False):
     """
     Write a mesh to a PLY file, with the option to save in ASCII or binary format.
@@ -222,6 +236,7 @@ def write_ply(filename, vertices, tris, quads, ascii=False):
                 
 # ==============IMAGE UTILS===============
 
+# 把多张同尺寸图像按行优先拼成大网格；行/列数可指定，也可按宽高比自动推算。
 def make_grid(images, nrow=None, ncol=None, aspect_ratio=None):
     num_images = len(images)
     if nrow is None and ncol is None:
@@ -248,6 +263,7 @@ def make_grid(images, nrow=None, ncol=None, aspect_ratio=None):
     return grid
 
 
+# 在图像下方补 32 像素黑边并写一行白色说明文字（内部按 BGR 往返转换）。
 def notes_on_image(img, notes=None):
     img = np.pad(img, ((0, 32), (0, 0), (0, 0)), 'constant', constant_values=0)
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
@@ -373,6 +389,7 @@ def text_image(text, resolution=(512, 512), max_size=0.5, h_align="left", v_alig
         return wrapped_lines, block_width, block_height, sizes, spacing
 
     # Use binary search to find the maximum scale that allows the text block to fit
+    # 中文：二分查找能容纳整段文字的最大字号（宽高都满足为止）。
     lo = 0.001
     hi = max_size
     eps = 0.001  # convergence threshold
@@ -431,6 +448,8 @@ def text_image(text, resolution=(512, 512), max_size=0.5, h_align="left", v_alig
 def save_image_with_notes(img, path, notes=None):
     """
     Save an image with notes.
+
+    中文说明：接受 torch.CHWD 或 numpy 图像，float 型自动 ×255 转 uint8，加注释后写盘。
     """
     if isinstance(img, torch.Tensor):
         img = img.cpu().numpy().transpose(1, 2, 0)

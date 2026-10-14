@@ -7,6 +7,9 @@ y/z 对换是一个**对换**（行列式 -1），会把对象镜像；因此必
 GT 剪影比较。若翻转版明显更高，说明 GT 被镜像，需要补一次单轴取反。
 
 网格轴语义（实测）：index0 = 画面水平、index1 = 视深、index2 = 画面竖直。
+
+运行：无参数（N_OBJ/VIEWS 为文件内常量）；脚本内已 chdir 到项目根。
+安全边界：只读 GT npz 与 renders_cond_t 图，不写任何文件；纯 CPU，不需 GPU。
 """
 import os
 import sys
@@ -26,6 +29,7 @@ R = 64
 
 
 def crop_norm(mask, res=R):
+    """按前景 bbox 裁切并缩放到 res×res 的布尔剪影（统一尺寸后才能比 IoU）；前景太少返回全空。"""
     ys, xs = np.nonzero(mask)
     if len(xs) < 4:
         return np.zeros((res, res), bool)
@@ -34,6 +38,7 @@ def crop_norm(mask, res=R):
 
 
 def main():
+    """对若干对象/视角：GT 投影剪影与渲染 alpha 剪影比 IoU，并与其左右翻转版比较，判定 GT 是否被镜像。"""
     objs = sorted(os.listdir(f'{ROOT}/{VOX}'))[:N_OBJ]
     ious, ious_flip = [], []
     for o in objs:

@@ -11,6 +11,12 @@ PBR 数据管线驱动 (自包含, 替代官方依赖 datasets/ 模块的脚本�
   python scripts/prepare_pbr_pipeline.py --stage B          # voxelize
   python scripts/prepare_pbr_pipeline.py --stage C          # encode (需要 GPU)
   python scripts/prepare_pbr_pipeline.py --stage D          # merge metadata
+
+CLI: --stage A|B|C|D [--workers N（A/B 默认 8/16）] [--gpu 5（仅 C 用）]
+输入：training_data/multiview_1186/metadata.csv 的 sha256/local_path；输出：pbr_dumps/*.pickle、
+      pbr_voxels_1024/*.vxz、pbr_latents/tex_enc_.../*.npz，D 阶段就地重写 metadata.csv。
+安全边界：会新建上述目录并写产物（D 覆盖 metadata.csv）；Blender 路径写死为 /tmp/blender-4.5.1-linux-x64/blender；
+          每个阶段都按"产物已存在则跳过"实现幂等重跑；不改动原始资产。
 """
 import os, sys, json, argparse, subprocess, glob, csv
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -30,11 +36,13 @@ META = os.path.join(DATA, 'metadata.csv')
 
 
 def load_meta():
+    """读 metadata.csv（含 sha256 / local_path 等列）。"""
     df = pd.read_csv(META)
     return df
 
 
 def finished(sha, kind):
+    """该资产在指定阶段(kind=dump/voxel/latent)的产物是否已存在——各阶段靠它实现幂等跳过。"""
     if kind == 'dump':
         return os.path.exists(os.path.join(PBR_DUMPS, f'{sha}.pickle'))
     if kind == 'voxel':
@@ -45,7 +53,9 @@ def finished(sha, kind):
 
 
 def stage_a(workers=8):
-    """Blender PBR dump, skip already-done. One Blender process per asset."""
+    """Blender PBR dump, skip already-done. One Blender process per asset.
+    Stage A：线程池并行调 Blender 跑 dump_pbr.py，已完成的资产跳过。
+    """
     df = load_meta()
     todo = [r for _, r in df.iterrows() if not finished(r['sha256'], 'dump')]
     print(f'[A] dump: {len(todo)} 待处理 / {len(df)} 总', flush=True)
@@ -57,6 +67,7 @@ def stage_a(workers=8):
 
 
 def dump_one(sha, obj_path):
+    """单个 Blender dump 任务：先写 <out>.tmp，成功后 os.replace 原子落盘；失败或没产物则写 <out>.err。"""
     out = os.path.join(PBR_DUMPS, f'{sha}.pickle')
     tmp = out + '.tmp'
     try:
@@ -74,6 +85,9 @@ def dump_one(sha, obj_path):
 
 
 def vox_one(path):
+    """Stage B 单元任务：读 pickle -> fix_dump 清洗 -> o_voxel 体素化成 PBR 属性 ->
+    对齐到 dual_grid 坐标（无 dual_grid 的资产退回原始坐标）-> 写 .vxz。
+    """
     import o_voxel
     sha = os.path.splitext(os.path.basename(path))[0]
     out_path = os.path.join(VOXELS, f'{sha}.vxz')
@@ -118,6 +132,9 @@ def align_to_dual_grid(sha, coord, attr):
 
 
 def fix_dump(dump):
+    """清洗 Blender dump：修正 alphaMode、追加默认灰材质给无材质面(mat_ids<0)、剔除退化三角形，
+    最后居中并缩放到单位尺寸 + y/z 轴修正（与 mesh_dumps/dual_grid 对齐）。全部对象无效时返回 None。
+    """
     import numpy as np
     from copy import deepcopy
     dump = deepcopy(dump)
@@ -179,6 +196,7 @@ def fix_dump(dump):
 
 
 def stage_b(workers=16):
+    """Stage B：多进程把已 dump 的资产体素化（已完成的跳过）。"""
     df = load_meta()
     todo = [r['sha256'] for _, r in df.iterrows() if finished(r['sha256'], 'dump') and not finished(r['sha256'], 'voxel')]
     print(f'[B] voxelize: {len(todo)} 待处理', flush=True)
@@ -190,6 +208,7 @@ def stage_b(workers=16):
 
 
 def stage_c(gpu='5'):
+    """Stage C：在指定 GPU 上用 tex_enc 编码器把体素属性编成 latent，逐资产写 npz（已完成的跳过）。"""
     os.environ['CUDA_VISIBLE_DEVICES'] = gpu
     import torch
     sys.path.insert(0, ROOT)
@@ -206,7 +225,7 @@ def stage_c(gpu='5'):
         for i, sha in enumerate(todo):
             coords, attr = o_voxel.io.read_vxz(os.path.join(VOXELS, f'{sha}.vxz'), num_threads=4)
             feats_parts = [attr[k] for k in ('base_color', 'metallic', 'roughness', 'alpha')]
-            feats = torch.cat(feats_parts, dim=-1).float() / 255.0 * 2 - 1
+            feats = torch.cat(feats_parts, dim=-1).float() / 255.0 * 2 - 1   # [0,255] -> [-1,1]，与编码器口径一致
             x = sp.SparseTensor(
                 feats,
                 torch.cat([torch.zeros_like(coords[:, :1]), coords], dim=-1).int(),
@@ -225,6 +244,7 @@ def stage_c(gpu='5'):
 
 
 def stage_d():
+    """Stage D：把三阶段完成状态与 latent token 数写回 metadata.csv（就地覆盖）。"""
     df = load_meta()
     df['pbr_dumped'] = df['sha256'].apply(lambda s: finished(s, 'dump'))
     df['pbr_voxelized'] = df['sha256'].apply(lambda s: finished(s, 'voxel'))

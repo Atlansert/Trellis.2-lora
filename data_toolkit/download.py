@@ -1,3 +1,12 @@
+"""下载原始 3D 资产（GLB/OBJ 等），是数据流水线的第一步。
+
+- 用途：按 metadata.csv 逐对象下载原始资产文件，并回填 local_path 等标记列。
+- 输入：--root（含 metadata.csv）、数据集适配模块（命令行第 1 个位置参数，
+  形如 datasets.<name>，提供 add_args/download）、可选 --instances 指定对象、--check_only 只校验不下载。
+- 输出：<download_root>/raw/ 下的资产文件 + raw/new_records/part_<rank>.csv（增量进度）。
+- 关键约定：默认只处理 local_path 为空（尚未下载）的对象；支持 --rank/--world_size 分片与美学分过滤。
+- 用法：python download.py <dataset_module> --root <dir> [--download_root <dir>] [--check_only]
+"""
 import os
 import copy
 import sys
@@ -6,6 +15,7 @@ import argparse
 import pandas as pd
 from easydict import EasyDict as edict
 
+# CLI 入口：以 datasets.<sys.argv[1]> 为数据集适配模块，实际下载交给 dataset_utils.download。
 if __name__ == '__main__':
     dataset_utils = importlib.import_module(f'datasets.{sys.argv[1]}')
 
@@ -44,6 +54,7 @@ if __name__ == '__main__':
         if opt.filter_low_aesthetic_score is not None:
             metadata = metadata[metadata['aesthetic_score'] >= opt.filter_low_aesthetic_score]
         if 'local_path' in metadata.columns:
+            # 只挑还没下载过的对象（local_path 为空）。
             metadata = metadata[metadata['local_path'].isna()]
     else:
         if os.path.exists(opt.instances):
@@ -61,4 +72,5 @@ if __name__ == '__main__':
 
     # process objects
     downloaded = dataset_utils.download(metadata, **opt)
+    # 每个 rank 写自己的进度分片。
     downloaded.to_csv(os.path.join(opt.download_root, 'raw', 'new_records', f'part_{opt.rank}.csv'), index=False)

@@ -1,3 +1,9 @@
+"""体素(Voxel)表示：稀疏体素坐标 + 每体素的属性张量，可读写磁盘。
+
+- coords: (N, 3) 整数体素坐标；attrs: (N, C) 属性，按 layout 里各字段的 slice 解释。
+- 世界坐标 = (coords + 0.5) * voxel_size + origin，即 origin 在体素中心而非角点。
+- save/load 走 o_voxel 的 IO，load 时按字段顺序重建 layout。
+"""
 from typing import Dict
 import torch
 
@@ -21,9 +27,11 @@ class Voxel:
         
     @property
     def position(self):
+        # 体素中心的世界坐标：(coords + 0.5) * voxel_size + origin
         return (self.coords + 0.5) * self.voxel_size + self.origin[None, :]
     
     def split_attrs(self):
+        # 按 layout 把 attrs 拆成 {字段名: 子张量}
         return {
             k: self.attrs[:, self.layout[k]]
             for k in self.layout

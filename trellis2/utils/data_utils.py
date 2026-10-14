@@ -1,3 +1,10 @@
+"""数据加载工具：递归搬设备、按负载分组、可断点续训的分布式采样器。
+
+- cycle 让 DataLoader 无限循环，并同步推进 ResumableSampler 的 idx/epoch 以便恢复。
+- ResumableSampler：按 rank 切分索引，支持 shuffle/padding/drop_last，state_dict 只存 epoch+idx。
+- BalancedResumableSampler：额外要求 dataset 有 loads（每个样本的开销），
+  每个 batch 内按 loads 均分到各 rank，使各进程计算量尽量接近。
+"""
 from typing import *
 import math
 import torch
@@ -31,6 +38,8 @@ def load_balanced_group_indices(
 ) -> List[List[int]]:
     """
     Split indices into groups with balanced load.
+
+    贪心：按 load 从大到小把样本放进当前累计负载最小的组；equal_size=True 时每组装满固定个数后封顶。
     """
     if equal_size:
         group_size = len(load) // num_groups
@@ -48,6 +57,7 @@ def load_balanced_group_indices(
 
 
 def cycle(data_loader: DataLoader) -> Iterator:
+    """无限循环迭代 DataLoader；每取一个 batch 就把采样器游标前移，便于保存/恢复进度。"""
     while True:
         for data in data_loader:
             if isinstance(data_loader.sampler, ResumableSampler):

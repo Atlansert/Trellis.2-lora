@@ -1,3 +1,12 @@
+"""网格渲染器：用 nvdiffrast 可微光栅化把 Mesh 渲染成多视图图片（训练监督 + 可视化）。
+
+- render 按 return_types 返回 mask/depth/normal/coord/attr，形状为 [C,H,W]。
+- attr 的含义取决于 mesh 类型：MeshWithVoxel 用体素属性三线性采样到表面，
+  MeshWithPbrMaterial 用 UV + 纹理贴图算 base_color/metallic/roughness/alpha，
+  普通 Mesh 直接插值 vertex_attrs。
+- ssaa>1 时先按放大分辨率光栅化，最后双线性降采样回 resolution；
+  chunk_size 非空则分块光栅化并用 z_buffer 做深度测试。
+"""
 from typing import *
 import torch
 from easydict import EasyDict as edict
@@ -22,6 +31,7 @@ def intrinsics_to_projection(
     """
     fx, fy = intrinsics[0, 0], intrinsics[1, 1]
     cx, cy = intrinsics[0, 2], intrinsics[1, 2]
+    # 注意 cx/cy 的符号：OpenCV 的 y 向下，OpenGL 裁剪空间 y 向上
     ret = torch.zeros((4, 4), dtype=intrinsics.dtype, device=intrinsics.device)
     ret[0, 0] = 2 * fx
     ret[1, 1] = 2 * fy
@@ -93,6 +103,7 @@ class MeshRenderer:
         clamp_barycentric_coords = self.rendering_options["clamp_barycentric_coords"]
         
         if mesh.vertices.shape[0] == 0 or mesh.faces.shape[0] == 0:
+            # 空网格：按 return_types 返回全零图（normal 用 0.5 表示朝向默认值）
             ret_dict = edict()
             for type in return_types:
                 if type == "mask" :
@@ -112,6 +123,7 @@ class MeshRenderer:
         
         perspective = intrinsics_to_projection(intrinsics, near, far)
         
+        # 顶点齐次化后分别算相机空间坐标（深度/法线用）与裁剪空间坐标（光栅化用）
         full_proj = (perspective @ extrinsics).unsqueeze(0)
         extrinsics = extrinsics.unsqueeze(0)
         

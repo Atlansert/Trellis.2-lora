@@ -1,3 +1,11 @@
+"""稀疏结构(SS)的 flow matching 主干网络：在 64³ 体素占位场上做去噪。
+
+- 输入 x: (B, in_channels, R, R, R)（R = resolution，SS 阶段为 64），会被展平成
+  B×R³ 个 token；条件 cond 为图像特征（DINOv3）。
+- 位置编码二选一：pe_mode="ape" 时用固定网格坐标的绝对位置编码 buffer pos_emb；
+  "rope" 时用同一批坐标预计算 RoPE 相位 buffer rope_phases。
+- 输出与输入同 shape，供下游采样器做 flow 更新；TimestepEmbedder 供本文件与 SLat flow 复用。
+"""
 from typing import *
 from functools import partial
 import torch
@@ -54,6 +62,7 @@ class TimestepEmbedder(nn.Module):
 
 
 class SparseStructureFlowModel(nn.Module):
+    """SS 阶段的 DiT 主干：稠密体素场上做 full attention，交叉注意图像条件 cond。"""
     def __init__(
         self,
         resolution: int,
@@ -100,12 +109,14 @@ class SparseStructureFlowModel(nn.Module):
             )
 
         if pe_mode == "ape":
+            # 绝对位置编码：把 R³ 个整数坐标一次性算好，存成 buffer
             pos_embedder = AbsolutePositionEmbedder(model_channels, 3)
             coords = torch.meshgrid(*[torch.arange(res, device=self.device) for res in [resolution] * 3], indexing='ij')
             coords = torch.stack(coords, dim=-1).reshape(-1, 3)
             pos_emb = pos_embedder(coords)
             self.register_buffer("pos_emb", pos_emb)
         elif pe_mode == "rope":
+            # RoPE 相位：按固定 R³ 网格坐标预计算并存成 buffer（由配置决定，不随权重覆盖）
             pos_embedder = RotaryPositionEmbedder(self.model_channels // self.num_heads, 3)
             coords = torch.meshgrid(*[torch.arange(res, device=self.device) for res in [resolution] * 3], indexing='ij')
             coords = torch.stack(coords, dim=-1).reshape(-1, 3)
@@ -222,14 +233,16 @@ class SparseStructureFlowModel(nn.Module):
             nn.init.constant_(self.out_layer.bias, 0)
 
     def forward(self, x: torch.Tensor, t: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        # 只接受 (B, in_channels, R, R, R) 的稠密体素场
         assert [*x.shape] == [x.shape[0], self.in_channels, *[self.resolution] * 3], \
                 f"Input shape mismatch, got {x.shape}, expected {[x.shape[0], self.in_channels, *[self.resolution] * 3]}"
 
+        # (B, C, R, R, R) -> (B, R³, C)，按 (x,y,z) 网格顺序展平成 token 序列
         h = x.view(*x.shape[:2], -1).permute(0, 2, 1).contiguous()
 
         h = self.input_layer(h)
         if self.pe_mode == "ape":
-            h = h + self.pos_emb[None]
+            h = h + self.pos_emb[None]  # pos_emb 与固定网格顺序一一对应
         t_emb = self.t_embedder(t)
         if self.share_mod:
             t_emb = self.adaLN_modulation(t_emb)
@@ -242,6 +255,7 @@ class SparseStructureFlowModel(nn.Module):
         h = F.layer_norm(h, h.shape[-1:])
         h = self.out_layer(h)
 
+        # (B, R³, C) -> (B, out_channels, R, R, R)，恢复成体素场给采样器
         h = h.permute(0, 2, 1).view(h.shape[0], h.shape[2], *[self.resolution] * 3).contiguous()
 
         return h

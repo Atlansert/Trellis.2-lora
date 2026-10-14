@@ -1,3 +1,12 @@
+"""把 mesh dump 转成柔性对偶网格（flexible dual grid），供 shape latent 编码使用。
+
+- 用途：数据重建流水线的一步：合并 mesh_dumps 的分部件网格 → 归一化 → 调 o_voxel 生成对偶网格，
+  写成 .vxz 并回填 metadata 的 dual_grid_converted_<res>/dual_grid_size_<res> 列。
+- 输入：--root（含 metadata.csv）、--mesh_dump_root/mesh_dumps/<sha256>.pickle、--resolution（可逗号分隔多档）。
+- 输出：<dual_grid_root>/dual_grid_<res>/<sha256>.vxz；进度分片写 new_records/part_<rank>.csv。
+- 关键约定：可选多分辨率同时生成；已存在的 .vxz 直接读信息复用（可中断续跑）；失败只记 error 不中断整体。
+- 用法：python dual_grid.py <dataset_module> --root <dir> [--resolution 256] [--rank 0 --world_size 1]
+"""
 import os
 import sys
 import importlib
@@ -11,6 +20,8 @@ from easydict import EasyDict as edict
 from functools import partial
 
 
+# 单对象任务：对 opt.resolution 里每个分辨率生成/复用对偶网格 .vxz，返回要回填 metadata 的 pack。
+# 注意：这里直接读取 __main__ 块里定义的全局 opt（含 resolution 列表），不是参数传入。
 def _dual_grid_mesh(file, metadatum, mesh_dump_root, root):
     sha256 = metadatum['sha256']
     try:

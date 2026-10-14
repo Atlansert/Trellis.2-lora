@@ -1,3 +1,10 @@
+"""PLY 网格读写工具（不依赖 torch，纯 numpy + 手写头部解析）。
+
+- read_ply 同时支持 ascii / binary_little_endian，返回 (vertices [N,3], tris [M,3], quads [K,4])；
+  只识别 3/4 边形，其它面数会报错（二进制分支）。
+- write_ply 写三角+四边形混合网格，可选 uint8 顶点色（RGB 或 RGBA）。
+- write_pbr_ply 写带 PBR 顶点属性的 PLY：xyz + RGB + metallic/roughness/alpha（均为 uint8）。
+"""
 from typing import Tuple, Dict
 import numpy as np
 from trimesh import grouping, util, remesh

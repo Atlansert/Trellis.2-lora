@@ -1,3 +1,14 @@
+"""逐视角稀疏结构（SS）潜变量数据集（配对的图-潜变量监督）。
+
+职责：每个物体一条实例，训练时随机抽一张渲染视图，配对该视图对应的 SS latent；
+支持两种帧约定（'view' 逐视角相机系 / 'canonical' 每物体唯一规范帧），并按宽高比与
+姿态偏角过滤视角；可选 canonical 审批契约（canonical_manifest）做哈希绑定校验。
+输入：roots（数据根目录配置）与过滤/契约参数；输出：{'x_0': latent, 'cond': 条件图}。
+契约：canonical_manifest 只能与 latent_frame='canonical' 同用；启用契约后，数据根目录、
+物体集合与逐视角文件都必须与契约一致，且每次取样本都会重新校验哈希（fail closed）。
+坐标约定：raw 轴 = (depth, length, up)。
+"""
+
 import csv, json, os
 from typing import *
 import numpy as np
@@ -7,7 +18,10 @@ from torch.utils.data import Dataset
 
 class ImageConditionedSparseStructureLatentViews(Dataset):
     """TRELLIS.1-style paired supervision: each rendered view is paired with
-    the SS latent of the mesh rotated into that view's camera frame."""
+    the SS latent of the mesh rotated into that view's camera frame.
+
+    中文：每个渲染视角配一份"把网格旋转到该视角相机系"后的 SS 潜变量。
+    """
     def __init__(self, roots: str, *, image_size=512, min_aesthetic_score=0.0,
                  crop_scale=1.2, skip_snapshot=True,
                  num_views=24, latent_frame='view',
@@ -17,10 +31,12 @@ class ImageConditionedSparseStructureLatentViews(Dataset):
         cfg=json.loads(roots) if isinstance(roots,str) else roots
         self.image_size=image_size; self.num_views=num_views
         self.latent_frame=str(latent_frame)
+        # latent_frame: 'view' = 每张视图配该视角相机系下的 latent；'canonical' = 目标为每物体唯一的规范帧 latent
         if self.latent_frame not in ('view', 'canonical'):
             raise ValueError("latent_frame must be 'view' or 'canonical'")
         self.canonical_latent_root=canonical_latent_root
         self._contract_root=None; self._contract_objects=None
+        # 审批契约：给出 canonical_manifest 时加载并强校验；allow_staged_contract 决定是否放行未审批数据
         if canonical_manifest is not None:
             if self.latent_frame != "canonical":
                 raise ValueError("canonical_manifest requires canonical latent_frame")
@@ -37,6 +53,7 @@ class ImageConditionedSparseStructureLatentViews(Dataset):
         self.max_view_offaxis = None if max_view_offaxis is None else float(max_view_offaxis)
         if self.max_view_offaxis is not None and self.max_view_offaxis < 0:
             raise ValueError('max_view_offaxis must be >= 0')
+        # crop_scale 必须 >= 1：裁剪框相对物体包围盒的放大倍数（1.0 = 刚好贴边，与推理一致）
         if self.crop_scale < 1.0:
             raise ValueError('crop_scale must be >= 1.0 (1.0 = 物体占满画面，与推理一致)')
         if min_aesthetic_score < 0:
@@ -49,6 +66,7 @@ class ImageConditionedSparseStructureLatentViews(Dataset):
         # TRELLIS.1 stores one instance per object and samples one view at
         # random in ``get_instance``.  Keep the same sampling semantics here
         # instead of expanding every object into 24 independent instances.
+        # 一个物体一条实例（具体视角在 __getitem__ 里随机抽），保持 TRELLIS.1 的采样语义
         self.instances=[]
         self._view_aspect={}
         self._view_offaxis={}
@@ -57,6 +75,7 @@ class ImageConditionedSparseStructureLatentViews(Dataset):
             latent_root=r.get('ss_view_latent')
             render_root=r.get('render_cond', os.path.join(base,'renders_cond'))
             if not latent_root: raise ValueError('data_dir requires ss_view_latent')
+            # 契约模式：数据根目录必须与契约记录的输出目录完全一致，否则直接报错
             if self._contract_root is not None:
                 from pathlib import Path
                 if Path(base).resolve()!=self._contract_root or Path(render_root).resolve()!=(self._contract_root/'renders_cond_t').resolve():
@@ -75,6 +94,7 @@ class ImageConditionedSparseStructureLatentViews(Dataset):
                         f'max_view_offaxis={self.max_view_offaxis} 需要 {cap}')
                 with open(cap) as cache_file:
                     self._view_offaxis.update(json.load(cache_file))
+            # 从 metadata.csv 读美学分与 cond_rendered，得到允许训练的候选物体集合
             eligible=None
             metadata_path=os.path.join(base, 'metadata.csv')
             if os.path.isfile(metadata_path):
@@ -88,6 +108,7 @@ class ImageConditionedSparseStructureLatentViews(Dataset):
                         rendered=str(row.get('cond_rendered', '')).lower() == 'true'
                         if rendered and score >= min_aesthetic_score:
                             eligible.add(row.get('sha256', ''))
+            # 逐个物体：按元数据/契约过滤后，收集合格视角并登记实例
             for obj in sorted(os.listdir(latent_root)):
                 if eligible is not None and obj not in eligible: continue
                 if self._contract_objects is not None and obj not in self._contract_objects: continue
@@ -116,6 +137,7 @@ class ImageConditionedSparseStructureLatentViews(Dataset):
                                    if table.get(os.path.basename(frames[i]['file_path']), 0)
                                    >= self.min_view_aspect]
                     valid=self._filter_offaxis(obj, frames, valid)
+                    # 视角过滤不能改变契约认可的视图集合
                     if self._contract_objects is not None:
                         contract_views=self._contract_objects[obj]["input_views"]
                         if valid!=contract_views:
@@ -142,6 +164,7 @@ class ImageConditionedSparseStructureLatentViews(Dataset):
                     valid=self._filter_offaxis(obj, frames, valid)
                     if valid:
                         self.instances.append((render_root,obj,od,valid))
+        # 最终一致性校验：实际物体集合必须与契约完全相同（多一个少一个都报错）
         if self._contract_objects is not None:
             names=[item[1] for item in self.instances]
             if len(names)!=len(self._contract_objects) or set(names)!=set(self._contract_objects):
@@ -152,6 +175,7 @@ class ImageConditionedSparseStructureLatentViews(Dataset):
               f'min_view_aspect={self.min_view_aspect}, '
               f'max_view_offaxis={self.max_view_offaxis}', flush=True)
     def _filter_offaxis(self, obj, frames, valid):
+        """按目标长轴偏角（度）过滤视角；该物体没有偏角缓存表时不保留任何视角。"""
         if self.max_view_offaxis is None:
             return valid
         table=self._view_offaxis.get(obj)
@@ -165,6 +189,7 @@ class ImageConditionedSparseStructureLatentViews(Dataset):
         return kept
     @staticmethod
     def _foreground_aspect(path):
+        """用 64x64 缩略图的 alpha 前景估计宽高比（长轴/短轴），用于筛掉端视/大斜视图。"""
         im=Image.open(path).convert('RGBA').resize((64, 64), Image.Resampling.BOX)
         a=np.array(im.getchannel('A'))
         ys,xs=np.nonzero(a>32)
@@ -173,6 +198,7 @@ class ImageConditionedSparseStructureLatentViews(Dataset):
         return (xs.max()-xs.min()+1)/max(1, ys.max()-ys.min()+1)
     def __len__(self): return len(self.instances)
     def _image(self,p):
+        """读图并裁到 alpha 包围盒（按 crop_scale 放大），缩放到 image_size 后乘 alpha 去背景。"""
         im=Image.open(p).convert('RGBA'); a=np.array(im.getchannel(3)); ys,xs=np.nonzero(a)
         if len(xs):
             cx=(xs.min()+xs.max())/2; cy=(ys.min()+ys.max())/2
@@ -183,8 +209,10 @@ class ImageConditionedSparseStructureLatentViews(Dataset):
         x=torch.from_numpy(np.array(im.convert('RGB'))).permute(2,0,1).float()/255
         return x*a.unsqueeze(0)
     def __getitem__(self,i):
+        """随机抽一个合格视角，返回 {'x_0': 该视角 latent, 'cond': 处理后的条件图}。"""
         rr,obj,od,valid=self.instances[i]
         v=int(np.random.choice(valid))
+        # 契约模式下每次取样本都重新校验帧序列哈希，防止初始化后数据被替换
         if self._contract_objects is not None:
             from .canonical_contract import file_sha256
             record=self._contract_objects[obj]
@@ -200,6 +228,7 @@ class ImageConditionedSparseStructureLatentViews(Dataset):
             view=next(item for item in record['views'] if item['view']==v)
             if file_sha256(lp)!=record['target_sha256'] or file_sha256(image_path)!=view['image_sha256']:
                 raise ValueError(f'canonical image/target changed after initialization: {obj}')
+        # latent 键：优先 'mean'（后验均值），否则 'z'
         with np.load(lp, allow_pickle=False) as latent:
             key='mean' if 'mean' in latent.files else 'z'
             x_0=torch.from_numpy(latent[key]).float()
@@ -211,6 +240,9 @@ class ImageConditionedSparseStructureLatentViews(Dataset):
         Per-view SS latents are 8-channel 3-D tensors; they are not directly
         displayable by torchvision.  A central occupancy proxy keeps snapshot
         bookkeeping from interfering with the actual training path.
+
+        中文：逐视角 SS latent 是 8 通道 3D 张量，torchvision 无法直接拼图，
+        这里取中间切片的前 3 通道作为占位图，只为让快照流程不干扰训练主路径。
         """
         x = x_0 if isinstance(x_0, torch.Tensor) else x_0['x_0']
         return x[:, :3, :, :, x.shape[-1] // 2]

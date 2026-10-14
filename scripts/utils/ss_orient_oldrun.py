@@ -7,6 +7,9 @@
 33k 看着正常只是因为"训练不足 + 条件编码器错配"把 LoRA 压住了。
 
 同时输出各配置占据体与 base 的 IoU，量化"有多接近 base"。
+
+运行：无参数（权重列表/测试图 001..004 为文件内常量）；需 GPU（默认卡 7）。
+安全边界：只读权重与 data_test/*.png，不写任何文件；纯判定实验。
 """
 import os
 import sys
@@ -42,6 +45,7 @@ IMGS = ['001', '002', '003', '004']
 
 
 def main():
+    """在 DINOv3 与 DINOv2 两种条件口径下，逐一加载旧/新各步权重，看长轴是否稳定，并与 base 输出比 IoU。"""
     pipe = Trellis2ImageTo3DPipeline.from_pretrained('checkpoints')
     pipe.cuda()
     ss = pipe.models['sparse_structure_flow_model']
@@ -62,6 +66,7 @@ def main():
     pipe.ss_image_cond_model = m3
 
     def occ(cond):
+        """按固定种子(42)采样 SS 并反填成 64³ 布尔占据体。"""
         torch.manual_seed(42)
         c = pipe.sample_sparse_structure(cond, 64, 1, dict(P)).cpu().numpy()
         o = np.zeros((64, 64, 64), bool)
@@ -70,6 +75,7 @@ def main():
         return o
 
     def desc(o):
+        """返回 (最长轴, 各轴跨度)；空体返回 ('empty',(0,0,0))。"""
         nz = np.argwhere(o)
         if not len(nz):
             return 'empty', (0, 0, 0)
@@ -77,13 +83,16 @@ def main():
         return 'xyz'[int(np.argmax(ext))], ext
 
     def iou(a, b):
+        """体素 IoU；两者都空时返回 0。"""
         u = (a | b).sum()
         return (a & b).sum() / u if u else 0.0
 
+    # base（不挂 LoRA）的输出作为参照，用来量化各权重"有多接近 base"。
     base3 = {n: occ(cond3[n]) for n in IMGS}
     base2 = {n: occ(cond2[n]) for n in IMGS}
 
     def run_table(cond, bases, title):
+        """在给定条件口径下依次评估各权重，打印长轴/跨度/与 base 的 IoU 对照表。"""
         print(f'\n### 条件编码器 = {title}')
         print(f'{"SS 权重":<22}{"图":<5}{"长轴":<6}{"跨度(x,y,z)":<17}{"vs base IoU":>11}')
         print('-' * 64)

@@ -1,3 +1,13 @@
+"""稀疏张量基础数据结构：VarLenTensor（变长批量）与 SparseTensor（带坐标的稀疏张量）。
+
+VarLenTensor：把所有 batch 的特征按行拼接成 feats (sum N_k, ...)，用 layout（slice 列表）
+描述每个 batch 占用的行区间；配套 seqlen / cum_seqlen / batch_boardcast_map 等缓存。
+SparseTensor：在 VarLenTensor 基础上增加 coords，每行 4 列 (batch, x, y, z)，且同一 batch
+的数据必须连续（否则 layout 推断失效）；shape=(B, *feat_dims)，spatial_shape=(X, Y, Z)。
+data 字段按 config.CONV 后端适配 torchsparse / spconv / 纯字典三种存储。
+空间缓存 _spatial_cache 以 scale 字符串为一级键，用于放大/缩小后的 layout 复用。
+"""
+
 from typing import *
 from fractions import Fraction
 import torch
@@ -22,9 +32,10 @@ class VarLenTensor:
         feats (torch.Tensor): Features of the varlen tensor.
         layout (List[slice]): Layout of the varlen tensor for each batch
     """
+    # feats: (sum_k N_k, ...)；layout[k] 是第 k 个 batch 在 feats 中的行切片
     def __init__(self, feats: torch.Tensor, layout: List[slice]=None):
         self.feats = feats
-        self.layout = layout if layout is not None else [slice(0, feats.shape[0])]
+        self.layout = layout if layout is not None else [slice(0, feats.shape[0])]  # 默认单 batch
         self._cache = {}
         
     @staticmethod
@@ -32,6 +43,7 @@ class VarLenTensor:
         """
         Create a layout from a tensor of sequence lengths.
         """
+        # 由每 batch 长度累加生成连续切片
         layout = []
         start = 0
         for l in seqlen:
@@ -66,6 +78,7 @@ class VarLenTensor:
     
     @property
     def shape(self) -> torch.Size:
+        # 逻辑形状 = (batch 数, 特征维...)；不包含点数
         return torch.Size([len(self.layout), *self.feats.shape[1:]])
     
     def dim(self) -> int:
@@ -278,8 +291,9 @@ class VarLenTensor:
             raise ValueError(f"Unsupported reduce operation: {op}")
         
         if dim is None or 0 in dim:
-            return red
+            return red  # 已含 batch 维，无需再分段归约
         
+        # 未含 batch 维：按 seqlen 对每个 batch 段做 segment_reduce
         red = torch.segment_reduce(red, reduce=op, lengths=self.seqlen)
         return red
     
@@ -293,6 +307,7 @@ class VarLenTensor:
         return self.reduce(op='prod', dim=dim, keepdim=keepdim)
     
     def std(self, dim: Optional[Union[int, Tuple[int,...]]] = None, keepdim: bool = False) -> torch.Tensor:
+        # 用 E[x^2] - E[x]^2 计算标准差（经 VarLenTensor 的 mean 定义域归约）
         mean = self.mean(dim=dim, keepdim=True)
         mean2 = self.replace(self.feats ** 2).mean(dim=dim, keepdim=True)
         std = (mean2 - mean ** 2).sqrt()
@@ -355,6 +370,7 @@ class SparseTensor(VarLenTensor):
     - Data corresponding to a same batch should be contiguous.
     - Coords should be in [0, 1023]
     """
+    # coords 每行 4 列 (batch, x, y, z)；SparseTensorData 按后端惰性导入
     SparseTensorData = None
 
     @overload
@@ -364,6 +380,7 @@ class SparseTensor(VarLenTensor):
     def __init__(self, data, shape: Optional[torch.Size] = None, **kwargs): ...
 
     def __init__(self, *args, **kwargs):
+        # method_id 0: (feats, coords, shape)；method_id 1: (data, shape)
         # Lazy import of sparse tensor backend
         if self.SparseTensorData is None:
             import importlib
@@ -397,6 +414,7 @@ class SparseTensor(VarLenTensor):
                 self.data = self.SparseTensorData(feats.reshape(feats.shape[0], -1), coords, spatial_shape[1:], spatial_shape[0], **kwargs)
                 self.data._features = feats
             else:
+                # 无后端时用普通字典保存 feats/coords（纯 PyTorch 路径）
                 self.data = {
                     'feats': feats,
                     'coords': coords,
@@ -413,7 +431,7 @@ class SparseTensor(VarLenTensor):
             self.data = data
 
         self._shape = shape
-        self._scale = kwargs.get('scale', (Fraction(1, 1), Fraction(1, 1), Fraction(1, 1)))
+        self._scale = kwargs.get('scale', (Fraction(1, 1), Fraction(1, 1), Fraction(1, 1)))  # 相对最初体素网格的缩放，作为缓存键
         self._spatial_cache = kwargs.get('spatial_cache', {})
 
         if config.DEBUG:
@@ -459,12 +477,14 @@ class SparseTensor(VarLenTensor):
         return len(self.layout)
         
     def __cal_shape(self, feats, coords):
+        # shape = (max(batch)+1, *feats.shape[1:])，即 (B, C, ...)
         shape = []
         shape.append(coords[:, 0].max().item() + 1)
         shape.extend([*feats.shape[1:]])
         return torch.Size(shape)
     
     def __cal_layout(self, coords, batch_size):
+        # 依赖“同 batch 坐标连续”：按 batch 计数得到每段起止
         seq_len = torch.bincount(coords[:, 0], minlength=batch_size)
         offset = torch.cumsum(seq_len, dim=0) 
         layout = [slice((offset[i] - seq_len[i]).item(), offset[i].item()) for i in range(batch_size)]
@@ -677,6 +697,7 @@ class SparseTensor(VarLenTensor):
         return new_tensor
     
     def to_dense(self) -> torch.Tensor:
+        # 返回稠密张量 (B, C, X, Y, Z)：未占用体素为 0
         if config.CONV == 'torchsparse':
             return self.data.dense()
         elif config.CONV == 'spconv':
@@ -690,6 +711,7 @@ class SparseTensor(VarLenTensor):
 
     @staticmethod
     def full(aabb, dim, value, dtype=torch.float32, device=None) -> 'SparseTensor':
+        # aabb=(x0,y0,z0,x1,y1,z1) 闭区间；dim=(N, C)；生成实心体素块，feats 全为 value
         N, C = dim
         x = torch.arange(aabb[0], aabb[3] + 1)
         y = torch.arange(aabb[1], aabb[4] + 1)
@@ -754,7 +776,7 @@ class SparseTensor(VarLenTensor):
         start = 0
         for new_idx, old_idx in enumerate(idx):
             new_coords.append(self.coords[self.layout[old_idx]].clone())
-            new_coords[-1][:, 0] = new_idx
+            new_coords[-1][:, 0] = new_idx  # batch 列重编号为新的位置
             new_feats.append(self.feats[self.layout[old_idx]])
             new_layout.append(slice(start, start + len(new_coords[-1])))
             start += len(new_coords[-1])
@@ -785,6 +807,7 @@ class SparseTensor(VarLenTensor):
         """
         Get a spatial cache.
         """
+        # 缓存按当前 scale 分桶，避免不同分辨率下的 layout 串用
         scale_key = str(self._scale)
         cur_scale_cache = self._spatial_cache.get(scale_key, {})
         if key is None:

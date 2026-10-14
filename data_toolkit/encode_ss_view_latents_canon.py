@@ -27,6 +27,7 @@ import trellis2.models as models  # noqa: E402
 PERM = (2, 0, 1)
 
 
+# CLI 入口：读 --voxel_name 下的逐视角体素，按 --perm 置换轴后编码，写到 --output_name/<obj>/NNN.npz。
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--root', required=True)
@@ -63,6 +64,7 @@ def main():
                 if perm is not None and len(c):
                     c = c[:, perm]
                 c = np.clip(c, 0, res - 1)
+                # 把稀疏整数坐标栅格化为 res^3 的二值占据网格（值 1 表示占据）。
                 x = torch.zeros(res, res, res, dtype=torch.float32)
                 if len(c):
                     x[c[:, 0], c[:, 1], c[:, 2]] = 1

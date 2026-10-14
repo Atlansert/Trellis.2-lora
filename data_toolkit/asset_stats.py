@@ -1,3 +1,13 @@
+"""统计每个资产的几何与贴图规模（只读，不改数据）。
+
+- 用途：为数据集筛选/分档提供依据：从 pbr_dumps（或退回 mesh_dumps）的 pickle 里数面数、
+  顶点数以及 baseColor/metallic/roughness/alpha 四类贴图的数量。
+- 输入：--root（含 metadata.csv）、--mesh_dump_root/mesh_dumps/、--pbr_dump_root/pbr_dumps/。
+- 输出：<root>/asset_stats/new_records/part_<rank>.csv（sha256 + 各项计数），供合并进 metadata。
+- 关键约定：pbr_dumped=True 的对象从 pbr dump 统计（含贴图数），其余从 mesh dump 统计；
+  只处理 metadata 中 num_faces 为空（尚未统计）且已 dump 的对象；支持 --rank/--world_size 分片。
+- 用法：python asset_stats.py --root <dir> [--max_workers N] [--rank 0 --world_size 1]
+"""
 import os
 import argparse
 import pickle
@@ -7,6 +17,7 @@ from easydict import EasyDict as edict
 from concurrent.futures import ThreadPoolExecutor
 
 
+# CLI 入口：参数解析 → 汇总 metadata → 多线程统计 → 写 new_records/part_<rank>.csv。
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--root', type=str, required=True,
@@ -63,6 +74,7 @@ if __name__ == '__main__':
         def worker(metadatum):
             try:
                 sha256 = metadatum['sha256']
+                # 统计线程：优先用 PBR dump（额外统计四类贴图数），否则退回 mesh dump（只有面/顶点数）。
                 if metadatum['pbr_dumped'] == True:
                     with open(os.path.join(opt.pbr_dump_root, 'pbr_dumps', f'{sha256}.pickle'), 'rb') as f:
                         dump = pickle.load(f)
@@ -129,4 +141,5 @@ if __name__ == '__main__':
 
     # save records
     records = pd.DataFrame.from_records(records)
+    # 每个 rank 写自己的分片文件名。
     records.to_csv(os.path.join(opt.root, 'asset_stats', 'new_records', f'part_{opt.rank}.csv'), index=False)

@@ -1,3 +1,12 @@
+"""稀疏注意力模块：SparseMultiHeadRMSNorm + SparseMultiHeadAttention。
+
+与 dense 版的差异：输入输出是 SparseTensor（q/k/v 只改 feats，coords 保持不变），
+所有线性层直接用 nn.Linear 作用在 feats 上（helper _linear）。
+attn_mode 支持 full / windowed / double_windowed（后者把 head 一分为二，一半用原窗口、
+一半用 shift 窗口）；use_rope 时按 coords 生成 RoPE 相位；cross-attn 只支持 full，
+且 context 可以是 dense 张量（如图像特征）或 VarLenTensor。
+"""
+
 from typing import *
 import torch
 import torch.nn as nn
@@ -9,6 +18,7 @@ from .rope import SparseRotaryPositionEmbedder
 
 
 class SparseMultiHeadRMSNorm(nn.Module):
+    """逐 head 的 RMSNorm（在 feats 上做 L2 归一化）；支持 VarLenTensor 与普通张量。"""
     def __init__(self, dim: int, heads: int):
         super().__init__()
         self.scale = dim ** 0.5
@@ -25,6 +35,7 @@ class SparseMultiHeadRMSNorm(nn.Module):
 
 
 class SparseMultiHeadAttention(nn.Module):
+    """多头自/交叉注意力；head_dim = channels // num_heads，支持 RoPE 与窗口注意力。"""
     def __init__(
         self,
         channels: int,
@@ -76,6 +87,7 @@ class SparseMultiHeadAttention(nn.Module):
 
     @staticmethod
     def _linear(module: nn.Linear, x: Union[VarLenTensor, torch.Tensor]) -> Union[VarLenTensor, torch.Tensor]:
+        # 稀疏输入只对 feats 做线性变换（coords 不变），dense 输入直接调用
         if isinstance(x, VarLenTensor):
             return x.replace(module(x.feats))
         else:
@@ -89,6 +101,7 @@ class SparseMultiHeadAttention(nn.Module):
             return x.reshape(*x.shape[:2], *shape)
 
     def _fused_pre(self, x: Union[VarLenTensor, torch.Tensor], num_fused: int) -> Union[VarLenTensor, torch.Tensor]:
+        # 把最后一维拆成 (num_fused, heads, head_dim)，即 qkv 的 [T, 3, H, C] 布局
         if isinstance(x, VarLenTensor):
             x_feats = x.feats.unsqueeze(0)
         else:
@@ -101,12 +114,12 @@ class SparseMultiHeadAttention(nn.Module):
             qkv = self._linear(self.to_qkv, x)
             qkv = self._fused_pre(qkv, num_fused=3)
             if self.qk_rms_norm or self.use_rope:
-                q, k, v = qkv.unbind(dim=-3)
+                q, k, v = qkv.unbind(dim=-3)  # 在 fused 维（3）上拆分
                 if self.qk_rms_norm:
                     q = self.q_rms_norm(q)
                     k = self.k_rms_norm(k)
                 if self.use_rope:
-                    q, k = self.rope(q, k)
+                    q, k = self.rope(q, k)  # 依据 coords 施加旋转位置编码
                 qkv = qkv.replace(torch.stack([q.feats, k.feats, v.feats], dim=1))
             if self.attn_mode == "full":
                 h = sparse_scaled_dot_product_attention(qkv)
@@ -115,6 +128,7 @@ class SparseMultiHeadAttention(nn.Module):
                     qkv, self.window_size, shift_window=self.shift_window
                 )
             elif self.attn_mode == "double_windowed":
+                # 一半 head 用原窗口，另一半用偏移半窗口的 shift 窗口，扩大感受野
                 qkv0 = qkv.replace(qkv.feats[:, :, self.num_heads//2:])
                 qkv1 = qkv.replace(qkv.feats[:, :, :self.num_heads//2])
                 h0 = sparse_windowed_scaled_dot_product_self_attention(
@@ -125,6 +139,7 @@ class SparseMultiHeadAttention(nn.Module):
                 )
                 h = qkv.replace(torch.cat([h0.feats, h1.feats], dim=1))
         else:
+            # cross：q 来自 x，k/v 来自 context（可为 dense 图像特征）
             q = self._linear(self.to_q, x)
             q = self._reshape_chs(q, (self.num_heads, -1))
             kv = self._linear(self.to_kv, context)
@@ -137,5 +152,5 @@ class SparseMultiHeadAttention(nn.Module):
             else:
                 h = sparse_scaled_dot_product_attention(q, kv)
         h = self._reshape_chs(h, (-1,))
-        h = self._linear(self.to_out, h)
+        h = self._linear(self.to_out, h)  # 输出投影回 channels
         return h

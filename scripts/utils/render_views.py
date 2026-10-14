@@ -17,6 +17,11 @@
 
 用法:
     python scripts/render_views.py --data_dir ./data_gen
+
+安全边界:
+    输出直接写进各 GLB 所在子目录（同名 png / transforms.json 会被覆盖）；
+    首次运行会 sudo apt-get 装依赖并把 Blender 3.0.1 解压到 /tmp（不改仓库）；
+    已有 transforms.json 且 24 张图齐全的子目录会被跳过（可安全重跑）。
 """
 
 import os
@@ -90,6 +95,7 @@ def render_one(name, glb_path, blender_script):
     out_dir = os.path.dirname(glb_path)
 
     # 检查是否已完成
+    # 幂等跳过判据：transforms.json 存在且 24 张视角图齐全，才认为该目录已完成。
     done_marker = os.path.join(out_dir, 'transforms.json')
     if os.path.exists(done_marker):
         all_imgs = all(
@@ -100,6 +106,7 @@ def render_one(name, glb_path, blender_script):
             return {'name': name, 'status': 'skipped'}
 
     cmd = [
+        # Blender 后台模式（-b）跑 data_toolkit/blender_script/render_view.py，实际渲染在 Blender 侧完成。
         BLENDER_PATH, '-b', '-P', blender_script,
         '--',
         '--object', os.path.abspath(glb_path),
@@ -117,6 +124,9 @@ def render_one(name, glb_path, blender_script):
 
 
 def main():
+    """CLI 入口：确保 Blender 可用 -> 扫描子目录 GLB/OBJ -> 多进程并行渲染 24 视角（每 15°）。
+    成功与否以"返回码为 0 且 transforms.json 落地"为准；失败项会打印可复制的 --only 重试命令。
+    """
     import argparse
     parser = argparse.ArgumentParser(
         description=f'用 data_gen 中的 GLB 渲染 {NUM_VIEWS} 个视角图 (每 15°, 纯白背景)')

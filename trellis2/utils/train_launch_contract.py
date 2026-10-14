@@ -1,4 +1,12 @@
-"""CPU-only training launch safety; checkpoint transactions owned by checkpoint_contract."""
+"""CPU-only training launch safety; checkpoint transactions owned by checkpoint_contract.
+
+训练启动安全契约（只做 CPU 侧校验，检查点事务由 checkpoint_contract 负责）：
+- resolve_checkpoint 在任何写输出之前决定本次从哪个 step 恢复：'none' / 'latest' / 数字 step，
+  禁止把已有输出历史与新 run 混用；'latest' 没有合法完成标记时报错而不是拿 legacy misc 顶替。
+- run_attempts 负责重试：auto_retry 表示最多尝试次数(0→1)；重试只能从本次输出目录里已提交的
+  检查点恢复，否则宁可停下，也不重放不确定的失败轨迹。
+- preserve_launch_records 把 config/command 与每次 launch 记录落盘（已存在的不覆盖）。
+"""
 import hashlib
 import json
 import os
@@ -21,6 +29,7 @@ def _validate(directory, step):
 
 
 def expected_files(cfg, step):
+    """某个 step 应存在的文件清单：misc + 每个模型本体及其各 ema_rate 副本。"""
     rates = cfg['trainer']['args'].get('ema_rate', 0.9999)
     if not isinstance(rates, (list, tuple)):
         rates = [rates]
@@ -54,6 +63,7 @@ def resolve_checkpoint(cfg, complete_steps=None, validate=None):
             raise ValueError('fresh --ckpt none would overwrite existing output history; use a new directory or explicit resume')
         return cfg
     if choice == 'latest':
+        # 有完整检查点就取最大 step；否则要求输出目录是全新的空目录
         steps = complete_steps(directory) if directory.is_dir() else []
         if steps:
             step = max(steps)
@@ -71,6 +81,7 @@ def resolve_checkpoint(cfg, complete_steps=None, validate=None):
         raise ValueError('checkpoint must be latest, none, or a positive numeric step')
     step = int(choice)
     marker = directory / f'complete_step{step:07d}.json'
+    # 显式数字 step：有完成标记就走完整校验，没有则按 legacy 只查文件名/大小并告警
     if marker.exists():
         validate(directory, step)
     else:
@@ -81,6 +92,7 @@ def resolve_checkpoint(cfg, complete_steps=None, validate=None):
 
 
 def _require_files(directory, filenames):
+    """检查文件齐全且非空；缺文件或 0 字节即视为该检查点组不完整。"""
     missing = [name for name in filenames if not (Path(directory)/name).is_file() or (Path(directory)/name).stat().st_size == 0]
     if missing:
         raise ValueError(f'incomplete checkpoint group: missing/empty {missing}')
@@ -168,7 +180,11 @@ def run_attempts(cfg, runner, record_path=None, record=None, complete_steps=None
 
 
 def load_pretrained_checked(model,state):
-    """Do not overwrite computed complex RoPE with historical serialized buffers."""
+    """Do not overwrite computed complex RoPE with historical serialized buffers.
+
+    加载预训练权重：丢弃权重里的 rope_phases（由配置重新计算），
+    除它之外的缺失 key 或任何多余 key 都直接报错。
+    """
     state=dict(state)
     buffers=dict(model.named_buffers())
     if 'rope_phases' in buffers:

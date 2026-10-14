@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：Stage1（SS）LoRA 训练，规范帧目标但条件图只保留侧视（前景宽高比 ≥3.5），从原厂权重重训。
+# 用法：bash scripts/run_ss_lora_canon_side_dinov3_20k.sh [GPU 号，默认 7]（步数以所引 config json 为准）。
+# 输出：results/multiview_1186_ss_flow_lora_64_views_canon_side/。
+# 边界：长跑 GPU 训练任务，持续写该输出目录；验收看成品长高比而非 loss，不开 canonicalize。
 # Stage1 SS LoRA —— 规范帧目标，但条件图只保留侧视（2026-10-11）。
 #
 # B′（canon_canonical，全 24 视角）把端视和侧视配成同一个满格侧视 latent。

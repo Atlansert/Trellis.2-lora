@@ -1,3 +1,14 @@
+"""把 PBR dump（材质+贴图）体素化成带材质属性的 .vxz。
+
+- 用途：数据重建流水线的一步：合并 pbr_dumps 的各部件几何与材质，归一化到 [-0.5,0.5]，
+  调 o_voxel 生成体素属性，写成 pbr_voxels_<res>/<sha256>.vxz 并回填 metadata 的 pbr_voxelized_<res> 列。
+- 输入：--root（含 metadata.csv）、--pbr_dump_root/pbr_dumps/<sha256>.pickle、--resolution（可逗号分隔多档）。
+- 输出：<pbr_voxel_root>/pbr_voxels_<res>/<sha256>.vxz（含 base_color/metallic/roughness/alpha）；
+  进度分片写 new_records/part_<rank>.csv。
+- 关键约定：为 None 的贴图补一个默认材质并把 mat_ids 的 -1 指向它；多分辨率按从大到小处理；
+  已存在的 .vxz 直接读信息复用（可中断续跑）；.vxz 里删掉 normal/emissive 通道。
+- 用法：python voxelize_pbr.py <dataset_module> --root <dir> [--resolution 1024] [--rank 0 --world_size 1]
+"""
 import os
 import copy
 import sys
@@ -12,6 +23,8 @@ from functools import partial
 import o_voxel
 
 
+# 单对象任务：对 opt.resolution 里每个分辨率生成/复用 PBR 体素 .vxz，返回要回填 metadata 的 pack。
+# 注意：这里直接读取 __main__ 块里定义的全局 opt（含 resolution 列表），不是参数传入。
 def _pbr_voxelize(file, metadatum, pbr_dump_root, root):
     sha256 = metadatum['sha256']
     try:
@@ -38,6 +51,7 @@ def _pbr_voxelize(file, metadatum, pbr_dump_root, root):
                     with open(os.path.join(pbr_dump_root, 'pbr_dumps', f'{sha256}.pickle'), 'rb') as f:
                         dump = pickle.load(f)
                     # Fix dump alpha map
+                    # 中文：alphaTexture 存在但 alphaMode=OPAQUE 的材质无法正确体素化，改为 BLEND。
                     for mat in dump['materials']:
                         if mat['alphaTexture'] is not None and mat['alphaMode'] == 'OPAQUE':
                             mat['alphaMode'] = 'BLEND'
@@ -53,6 +67,7 @@ def _pbr_voxelize(file, metadatum, pbr_dump_root, root):
                         "metallicTexture": None,
                         "roughnessTexture": None,
                     })      # append default material
+                    # 中文：追加默认材质作为兜底（下面把 mat_ids==-1 改指向它），并丢弃空几何部件。
                     dump['objects'] = [
                         obj for obj in dump['objects']
                         if obj['vertices'].size != 0 and obj['faces'].size != 0
@@ -62,6 +77,7 @@ def _pbr_voxelize(file, metadatum, pbr_dump_root, root):
                     vertices_max = vertices.max(dim=0)[0]
                     center = (vertices_min + vertices_max) / 2
                     scale = 0.99999 / (vertices_max - vertices_min).max()
+                    # 中文：所有部件共用同一 center/scale（保证相对位置不变），留极小余量避免越界。
                     for obj in dump['objects']:
                         obj['vertices'] = (torch.from_numpy(obj['vertices']).float() - center) * scale
                         obj['vertices'] = obj['vertices'].numpy()
@@ -72,6 +88,7 @@ def _pbr_voxelize(file, metadatum, pbr_dump_root, root):
                 coord, attr = o_voxel.convert.blender_dump_to_volumetric_attr(dump, grid_size=res, aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
                                                                               mip_level_offset=0, verbose=False, timing=False)
                 del attr['normal']
+                # 中文：normal/emissive 不进入 latent 输入，落盘前删掉以省空间。
                 del attr['emissive']
                 o_voxel.io.write_vxz(os.path.join(root, f'pbr_voxels_{res}', f'{sha256}.vxz'), coord, attr)
                 pack[f'pbr_voxelized_{res}'] = True

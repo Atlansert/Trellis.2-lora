@@ -1,3 +1,12 @@
+"""稀疏全注意力：把变长稀疏张量拼接后做分段（varlen）注意力。
+
+签名与 dense 版类似（qkv / q+kv / q,k,v 三种），但输入可为 VarLenTensor
+（此时视为 [N, *, H, C]，* 是每个 batch 的可变点数）或 dense [N, L, H, C]，两者可混用。
+实现：取出 feats 拼成 [T, ...]，用 q_seqlen/kv_seqlen 构造 cu_seqlens（或 BlockDiagonalMask），
+交给 xformers / flash-attn 的 varlen 接口，保证不同 batch 之间不互相注意；
+若 q 是稀疏张量，则用 s.replace(out) 把结果套回原 coords。
+"""
+
 from typing import *
 import torch
 from .. import VarLenTensor
@@ -81,6 +90,7 @@ def sparse_scaled_dot_product_attention(q: torch.Tensor, k: VarLenTensor, v: Var
     ...
 
 def sparse_scaled_dot_product_attention(*args, **kwargs):
+    # 统一入口；s 记录“需要套回稀疏结构”的模板张量，N/L 供 dense 输出 reshape
     arg_names_dict = {
         1: ['qkv'],
         2: ['q', 'kv'],
@@ -98,6 +108,7 @@ def sparse_scaled_dot_product_attention(*args, **kwargs):
         device = qkv.device
 
         s = qkv
+        # q_seqlen 记录每个 batch 的点数，用于构造分段注意力边界
         q_seqlen = [qkv.layout[i].stop - qkv.layout[i].start for i in range(qkv.shape[0])]
         kv_seqlen = q_seqlen
         qkv = qkv.feats     # [T, 3, H, C]
@@ -184,6 +195,7 @@ def sparse_scaled_dot_product_attention(*args, **kwargs):
     elif config.ATTN == 'flash_attn':
         if 'flash_attn' not in globals():
             import flash_attn
+        # cu_seqlens: 各 batch 段在拼接序列中的起止偏移 [N+1]
         cu_seqlens_q = torch.cat([torch.tensor([0]), torch.cumsum(torch.tensor(q_seqlen), dim=0)]).int().to(device)
         if num_all_args in [2, 3]:
             cu_seqlens_kv = torch.cat([torch.tensor([0]), torch.cumsum(torch.tensor(kv_seqlen), dim=0)]).int().to(device)
@@ -215,6 +227,6 @@ def sparse_scaled_dot_product_attention(*args, **kwargs):
         raise ValueError(f"Unknown attention module: {config.ATTN}")
     
     if s is not None:
-        return s.replace(out)
+        return s.replace(out)  # 稀疏输入：仅替换 feats，coords 不变
     else:
-        return out.reshape(N, L, H, -1)
+        return out.reshape(N, L, H, -1)  # dense 输入：还原 [N, L, H, C]

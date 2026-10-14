@@ -1,3 +1,11 @@
+"""稀疏 Transformer block（pre-norm 残差结构）。
+
+SparseTransformerBlock：MSA + FFN 两段，各为 x = x + branch(norm(x))。
+SparseTransformerCrossBlock：self-attn + cross-attn + FFN 三段，context 为条件序列
+（图像特征等，可为 dense [B, L, C] 或 VarLenTensor）。
+x 是 SparseTensor：norm/attn/mlp 只作用在 feats 上，用 replace() 保持 coords 不变。
+"""
+
 from typing import *
 import torch
 import torch.nn as nn
@@ -9,6 +17,7 @@ from ...norm import LayerNorm32
 
 
 class SparseFeedForwardNet(nn.Module):
+    """稀疏 FFN：C -> C*mlp_ratio -> C（两点线性 + GELU）。"""
     def __init__(self, channels: int, mlp_ratio: float = 4.0):
         super().__init__()
         self.mlp = nn.Sequential(
@@ -61,6 +70,7 @@ class SparseTransformerBlock(nn.Module):
         )
 
     def _forward(self, x: SparseTensor) -> SparseTensor:
+        # attn 内部会处理 windowed/rope；此处两段残差：attn 与 mlp
         h = x.replace(self.norm1(x.feats))
         h = self.attn(h)
         x = x + h
@@ -70,6 +80,7 @@ class SparseTransformerBlock(nn.Module):
         return x
 
     def forward(self, x: SparseTensor) -> SparseTensor:
+        # use_checkpoint 时用梯度检查点省显存（重算前向）
         if self.use_checkpoint:
             return torch.utils.checkpoint.checkpoint(self._forward, x, use_reentrant=False)
         else:
@@ -80,6 +91,7 @@ class SparseTransformerCrossBlock(nn.Module):
     """
     Sparse Transformer cross-attention block (MSA + MCA + FFN).
     """
+    # ctx_channels 为上下文（条件）特征维；cross_attn 固定 full 模式
     def __init__(
         self,
         channels: int,
@@ -127,6 +139,7 @@ class SparseTransformerCrossBlock(nn.Module):
         )
 
     def _forward(self, x: SparseTensor, context: Union[torch.Tensor, VarLenTensor]) -> SparseTensor:
+        # norm2 之后做 cross-attn，query 来自 x，key/value 来自 context
         h = x.replace(self.norm1(x.feats))
         h = self.self_attn(h)
         x = x + h

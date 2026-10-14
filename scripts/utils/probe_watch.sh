@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：守候型 watcher：等某 run 的 SS 检查点出现后，逐个调用 ss_frame_probe.py 判定"帧归属"（视角帧还是规范帧）。
+# 用法：bash scripts/utils/probe_watch.sh <A|B> [gpu，默认 6]；A=视角帧监督 run，B=规范帧监督 run。
+# 输出：results_infer/_frame_probe_<A|B>.log（各步的探针输出都追加在这一个日志里）。
+# 边界：只读检查点并跑 GPU 探针（不写权重、不训练）；内部轮询 sleep 90，可长时间常驻。
 # 帧归属判定 watcher：<run> ∈ {A: 视角帧监督, B: 规范帧监督}
 #
 # 修正：原来一个脚本先跑完 A 再跑 B，导致 B 的早期检查点（2k/5k）被 A 的 20k..50k

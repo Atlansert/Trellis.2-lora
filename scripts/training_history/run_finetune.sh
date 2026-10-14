@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：TRELLIS.2 端到端微调一键脚本：识别数据格式 → 预处理/体素化 → VAE 微调 → 编码 shape latent → Flow 微调（可接力续训）。
+# 用法：bash scripts/training_history/run_finetune.sh --data_dir <数据目录> [--fresh | --name <名> | --skip-vae | --skip-flow | --multiview ...]（细分选项见下方原有说明）。
+# 输出：./training_data/<数据集名>/（预处理产物）+ ./results/<名>_vae/ 与 ./results/<名>_flow/（checkpoint、log）。
+# 边界：过程中会调用 scripts/apply_patches.py（**原地修改 trellis2/ 源码**）与 convert_safetensors_to_pt.py（写 checkpoints/ckpts/*.pt），
+#       并长时间占用 GPU；输入数据目录只读。
 # =============================================================================
 # TRELLIS.2 迭代微调 — 统一脚本
 # =============================================================================

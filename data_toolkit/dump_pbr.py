@@ -1,3 +1,14 @@
+"""用 Blender 无头模式导出资产的 PBR 材质 dump（pickle）。
+
+- 用途：数据重建流水线的材质准备步骤：对每个已下载资产调用 blender_script/dump_pbr.py，
+  把材质与贴图落成 <pbr_dump_root>/pbr_dumps/<sha256>.pickle。
+- 输入：--root（含 metadata.csv）、--download_root/raw/ 的本地资产、数据集适配模块（位置参数 1）。
+- 输出：pbr_dumps/<sha256>.pickle + pbr_dumps/new_records/part_<rank>.csv（增量进度）。
+- 关键约定：首次运行会下载安装 Blender 4.5.1，并额外在 Blender 内置 Python 里跑
+  blender_script/install_pillow.py 装 Pillow；.blend 直接作为工程参数，其余格式走 -P 脚本；
+  只处理 local_path 非空且尚未 dump 的对象；失败信息从 *_error.txt 读取后抛错。
+- 用法：python dump_pbr.py <dataset_module> --root <dir> [--pbr_dump_root <dir>] [--max_workers N]
+"""
 import os
 import shutil
 import copy
@@ -16,6 +27,7 @@ BLENDER_LINK = 'https://ftp.halifax.rwth-aachen.de/blender/release/Blender4.5/bl
 BLENDER_INSTALLATION_PATH = '/tmp'
 BLENDER_PATH = f'{BLENDER_INSTALLATION_PATH}/blender-4.5.1-linux-x64/blender'
 
+# 若 /tmp 下没有 Blender（含运行库依赖）就下载安装；随后确保 Blender 内置 Python 有 Pillow。
 def _install_blender():
     if not os.path.exists(BLENDER_PATH):
         os.system('sudo apt-get update')
@@ -25,6 +37,8 @@ def _install_blender():
     os.system(f'{BLENDER_PATH} -b --python {os.path.join(os.path.dirname(__file__), "blender_script", "install_pillow.py")}')
 
 
+# 单对象任务：在临时目录里跑 Blender 导出 PBR，成功后 move 到最终路径。
+# 成功返回 {sha256, pbr_dumped: True}，失败抛 ValueError（附 Blender 写的错误信息）。
 def _dump_pbr(file_path, metadatum, root):
     sha256 = metadatum['sha256']
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -52,6 +66,7 @@ def _dump_pbr(file_path, metadatum, root):
             else:
                 raise ValueError(f'Failed to dump PBR. File {file_path}.')
 
+# CLI 入口：以 datasets.<sys.argv[1]> 为数据集适配模块，foreach_instance 负责并发与本地文件解析。
 if __name__ == '__main__':
     dataset_utils = importlib.import_module(f'datasets.{sys.argv[1]}')
 
@@ -112,6 +127,7 @@ if __name__ == '__main__':
     records = []
 
     # filter out objects that are already processed
+    # 中文：按已存在的 .pickle 反推已处理对象并从待处理列表中剔除（可中断续跑）。
     sha256_list = os.listdir(os.path.join(opt.pbr_dump_root, 'pbr_dumps'))
     sha256_list = [os.path.splitext(f)[0] for f in sha256_list if f.endswith('.pickle')]
     for sha256 in sha256_list:
@@ -125,4 +141,5 @@ if __name__ == '__main__':
     func = partial(_dump_pbr, root=opt.pbr_dump_root)
     pbr_dumped = dataset_utils.foreach_instance(metadata, opt.download_root, func, max_workers=opt.max_workers, desc='Dumping PBR')
     pbr_dumped = pd.concat([pbr_dumped, pd.DataFrame.from_records(records)])
+    # 每个 rank 写自己的进度分片。
     pbr_dumped.to_csv(os.path.join(opt.pbr_dump_root, 'pbr_dumps', 'new_records', f'part_{opt.rank}.csv'), index=False)

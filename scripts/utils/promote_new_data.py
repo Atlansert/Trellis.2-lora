@@ -8,6 +8,11 @@
   * 渲染图为 RGBA 且具真实 alpha（与官方 render_cond.py / 推理约定一致）
   * 物体填充比在合理区间
 不通过的单元不移动，单独列出。
+
+CLI: [--root /data/lzx/TRELLIS.2] [--staged new_data_staged] [--dest data_for_train] [--apply]
+输出：stdout 校验报告（通过数、填充比统计、未通过原因）。
+安全边界：默认只校验不动文件；只有加 --apply 才把通过单元 shutil.move 进 --dest（目标同名则跳过），
+          移动后暂存区不再保留该单元。
 """
 import os
 import re
@@ -22,6 +27,7 @@ LABELS = [f'cam_{y:03d}' for y in range(0, 360, 15)]
 
 
 def probe_glb(path):
+    """快速校验 GLB 头(magic/声明长度)与首个 JSON 块，要求至少一个 mesh primitive；返回 (是否有效, 原因)。"""
     size = os.path.getsize(path)
     with open(path, 'rb') as f:
         head = f.read(12)
@@ -39,7 +45,9 @@ def probe_glb(path):
 
 
 def check_unit(d, need_alpha=True):
-    """返回 (ok, 原因列表, 统计)"""
+    """返回 (ok, 原因列表, 统计)。逐项校验：GLB 有效性、transforms.json 的 24 帧与 yaw 序列、
+    24 张渲染图是否齐全、alpha 是否为真实透明背景、物体填充比是否在合理区间。
+    """
     probs = []
     mesh = os.path.join(d, 'mesh_textured_pbr.glb')
     if not os.path.isfile(mesh):
@@ -88,6 +96,7 @@ def check_unit(d, need_alpha=True):
 
 
 def main():
+    """校验暂存区全部单元；未通过的不动，通过的在 --apply 时移入 data_for_train。"""
     ap = argparse.ArgumentParser()
     ap.add_argument('--root', default='/data/lzx/TRELLIS.2')
     ap.add_argument('--staged', default='new_data_staged')

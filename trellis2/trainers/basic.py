@@ -1,3 +1,15 @@
+"""训练主循环 BasicTrainer：所有训练器的基类。
+
+职责：初始化模型/DDP/主参数/EMA/优化器/调度器/弹性显存/梯度裁剪；检查点的"完整组"
+原子保存与加载（模型+EMA+misc，带 complete marker 与哈希校验）；断点恢复（优化器、
+数据采样进度、RNG 状态、scaler/log_scale）；训练步（梯度累积、混合精度、梯度裁剪、
+NaN 保护）；EMA 更新、采样快照与日志/可视化。
+输入：models、dataset 及一批训练超参；输出：output_dir 下的 ckpts/、samples/、tb_logs/、log.txt。
+契约：save 只能由 rank0 调用；load / finetune_from / snapshot 需所有进程调用；
+'inflat_all' 模式下更新发生在 FP32 主参数上；LoRA 与复数 buffer（如 rope_phases）
+在 dtype 转换时必须保持原精度，rope_phases 不入库（可由模型自行重建）。
+"""
+
 from abc import abstractmethod
 import os
 import time
@@ -29,6 +41,8 @@ from ..utils.checkpoint_contract import (atomic_save_group, validate_checkpoint,
 class BasicTrainer:
     """
     Trainer for basic training loop.
+    
+    训练主循环基类：负责初始化、检查点保存/恢复、训练步、EMA、快照与日志。
     
     Args:
         models (dict[str, nn.Module]): Models to train.
@@ -205,6 +219,7 @@ class BasicTrainer:
     def init_models_and_more(self, **kwargs):
         """
         Initialize models and more.
+        建 DDP 包装、主参数、EMA、优化器、LR 调度器、弹性显存控制器与梯度裁剪器。
         """
         if self.world_size > 1:
             # Prepare distributed data parallel
@@ -222,6 +237,8 @@ class BasicTrainer:
             self.training_models = self.models
 
         # Build master params
+        # 需要梯度的参数汇总为 model_params；主参数按精度模式决定：
+        # 'amp' 直接复用模型参数（由 GradScaler 处理），'inflat_all' 另建一份展平的 FP32 主参数
         self.model_params = sum(
             [[p for p in model.parameters() if p.requires_grad] for model in self.models.values()]
         , [])
@@ -239,16 +256,19 @@ class BasicTrainer:
             raise NotImplementedError(f'Mix precision mode {self.mix_precision_mode} is not implemented.')
 
         # Build EMA params
+        # EMA 只在 rank0 上维护（落盘也只有 rank0），每个 ema_rate 对应一份深拷贝
         if self.is_master:
             self.ema_params = [copy.deepcopy(self.master_params) for _ in self.ema_rate]
 
         # Initialize optimizer
+        # 先查 torch.optim，再回退到本模块 globals（支持自定义优化器）；优化器只更新主参数
         if hasattr(torch.optim, self.optimizer_config['name']):
             self.optimizer = getattr(torch.optim, self.optimizer_config['name'])(self.master_params, **self.optimizer_config['args'])
         else:
             self.optimizer = globals()[self.optimizer_config['name']](self.master_params, **self.optimizer_config['args'])
         
         # Initalize learning rate scheduler
+        # 同样先查 torch.optim.lr_scheduler，再回退 globals（例如 LinearWarmupLRScheduler）
         if self.lr_scheduler_config is not None:
             if hasattr(torch.optim.lr_scheduler, self.lr_scheduler_config['name']):
                 self.lr_scheduler = getattr(torch.optim.lr_scheduler, self.lr_scheduler_config['name'])(self.optimizer, **self.lr_scheduler_config['args'])
@@ -256,6 +276,7 @@ class BasicTrainer:
                 self.lr_scheduler = globals()[self.lr_scheduler_config['name']](self.optimizer, **self.lr_scheduler_config['args'])
 
         # Initialize elastic memory controller
+        # 弹性显存控制器：注册到声明为 Elastic 的模型上，训练中可按显存预算换入换出模块
         if self.elastic_controller_config is not None:
             assert any([isinstance(model, (elastic_utils.ElasticModule, elastic_utils.ElasticModuleMixin)) for model in self.models.values()]), \
                 'No elastic module found in models, please inherit from ElasticModule or ElasticModuleMixin'
@@ -265,6 +286,7 @@ class BasicTrainer:
                     model.register_memory_controller(self.elastic_controller)
 
         # Initialize gradient clipper
+        # float/int 直接当阈值；dict 则实例化 grad_clip_utils 里的裁剪器（带状态，会被存进 misc）
         if self.grad_clip is not None:
             if isinstance(self.grad_clip, (float, int)):
                 self.grad_clip = float(self.grad_clip)
@@ -274,6 +296,7 @@ class BasicTrainer:
     def prepare_dataloader(self, **kwargs):
         """
         Prepare dataloader.
+        可恢复采样器 ResumableSampler（保存/恢复数据遍历进度）+ 多进程 DataLoader。
         """
         self.data_sampler = ResumableSampler(
             self.dataset,
@@ -294,11 +317,13 @@ class BasicTrainer:
     def _master_params_to_state_dicts(self, master_params):
         """
         Convert master params to dict of state_dicts.
+        把主参数写回各模型的 state_dict（inflat_all 下先拆回原形状），供保存使用。
         """
         if self.mix_precision_mode == 'inflat_all':
             master_params = unflatten_master_params(self.model_params, master_params)
         state_dicts = {name: model.state_dict() for name, model in self.models.items()}
         # RoPE phases are deterministic runtime buffers. Do not persist them:
+        # 中文：RoPE 相位是可重建的运行时 buffer，不入库；否则 AMP 会把 complex64 相位转成 bf16 造成损坏。
         # AMP conversion can cast complex64 phases to bfloat16, corrupting
         # subsequent resume/inference.
         for state_dict in state_dicts.values():
@@ -313,6 +338,7 @@ class BasicTrainer:
     def _state_dicts_to_master_params(self, master_params, state_dicts):
         """
         Convert a state_dict to master params.
+        从 state_dict 取回所有可训练参数并写回主参数（inflat_all 展平后拷贝，否则逐个 copy_）。
         """
         master_params_names = sum(
             [[(name, n) for n, p in model.named_parameters() if p.requires_grad] for name, model in self.models.items()]
@@ -328,10 +354,12 @@ class BasicTrainer:
         """
         Load a checkpoint.
         Should be called by all processes.
+        载入 load_dir/ckpts 下指定 step 的完整 checkpoint 组（所有进程都要调用）。
         """
         if self.is_master:
             print(f'\nLoading checkpoint from step {step}...', end='')
             
+        # 期望的完整组：每个模型一份权重 + 每个 EMA rate 一份 + misc（缺一不可）
         ckpt_dir = os.path.join(load_dir, 'ckpts')
         expected_names = {f'{name}_step{step:07d}.pt' for name in self.models}
         expected_names.update(f'{name}_ema{rate}_step{step:07d}.pt'
@@ -343,15 +371,18 @@ class BasicTrainer:
                 raise ValueError('checkpoint complete group does not match configured models/EMA rates')
         else:
             # Legacy is allowed only when explicitly selected by the caller;
+            # 中文：无 complete marker 的历史 checkpoint 仅在调用方显式选择时允许，且要求文件齐全、非空
             # new latest selection uses complete markers, never misc alone.
             if not all(os.path.isfile(os.path.join(ckpt_dir, n)) and os.path.getsize(os.path.join(ckpt_dir, n)) > 0 for n in expected_names):
                 raise ValueError('legacy checkpoint group incomplete')
             warnings.warn('Explicit legacy checkpoint: no atomic complete marker/hash contract', RuntimeWarning)
         model_ckpts = {}
+        # 逐个模型载入权重；rope_phases 不入库，保留模型自建的 complex64 版本
         for name, model in self.models.items():
             model_ckpt = torch.load(read_file_dist(os.path.join(load_dir, 'ckpts', f'{name}_step{step:07d}.pt')), map_location=self.device, weights_only=True)
             model_ckpts[name] = model_ckpt
             # Keep the freshly initialized complex64 RoPE phases. Older
+            # 中文：保留模型刚初始化的 complex64 RoPE 相位；老 checkpoint 里可能是被 AMP 转成 bf16 的副本
             # checkpoints may contain an AMP-cast bfloat16 copy.
             rope_phases = getattr(model, 'rope_phases', None)
             model_ckpt.pop('rope_phases', None)
@@ -380,6 +411,7 @@ class BasicTrainer:
         align_optimizer_moments(self.optimizer)
         if misc_ckpt['step'] != step:
             raise ValueError('misc checkpoint step does not match selected group')
+        # 恢复 misc：步数已与所选组校验一致，下面依次恢复采样进度、精度状态、调度器、弹性控制器与 RNG
         self.step = misc_ckpt['step']
         self.data_sampler.load_state_dict(misc_ckpt['data_sampler'])
         if self.mix_precision_mode == 'amp' and self.mix_precision_dtype == torch.float16:
@@ -392,6 +424,7 @@ class BasicTrainer:
             self.elastic_controller.load_state_dict(misc_ckpt['elastic_controller'])
         if self.grad_clip is not None and not isinstance(self.grad_clip, float):
             self.grad_clip.load_state_dict(misc_ckpt['grad_clip'])
+        # RNG 状态按 rank 保存，保证断点续训的随机性与不间断训练一致
         restore_rng_state(misc_ckpt.get('rng_state'), rank=self.rank, world_size=self.world_size)
         del misc_ckpt
 
@@ -408,15 +441,18 @@ class BasicTrainer:
 
         non_blocking is retained for callers but no writer threads are used.
         Completion marker, not a misc file, is the transaction visibility point.
+        中文：rank0 同步落盘一整组 checkpoint（模型 + EMA + misc），以 complete marker 作为提交点。
         """
         assert self.is_master, 'save() should be called only by the rank 0 process.'
         print(f'\nSaving synchronous checkpoint at step {self.step}...', end='', flush=True)
+        # 收集负载：模型参数 + 每个 EMA rate 的参数（都从主参数导出）
         payloads = {}
         for name, state in self._master_params_to_state_dicts(self.master_params).items():
             payloads[f'{name}_step{self.step:07d}.pt'] = state
         for i, rate in enumerate(self.ema_rate):
             for name, state in self._master_params_to_state_dicts(self.ema_params[i]).items():
                 payloads[f'{name}_ema{rate}_step{self.step:07d}.pt'] = state
+        # misc：续训所需的状态——优化器、步数、数据采样进度、RNG
         misc_ckpt = {'optimizer': self.optimizer.state_dict(), 'step': self.step,
                      'data_sampler': self.data_sampler.state_dict(),
                      'rng_state': capture_rng_state(rank=self.rank, world_size=self.world_size)}
@@ -430,11 +466,14 @@ class BasicTrainer:
             misc_ckpt['elastic_controller'] = self.elastic_controller.state_dict()
         if self.grad_clip is not None and not isinstance(self.grad_clip, float):
             misc_ckpt['grad_clip'] = self.grad_clip.state_dict()
+        # 再补齐精度状态/调度器/弹性控制器/裁剪器，然后整组原子写出
         payloads[f'misc_step{self.step:07d}.pt'] = misc_ckpt
+        # 原子写整组 + 校验 + 最后写 marker；rng_scope 注明只覆盖 rank0（不含 dataloader worker 状态）
         atomic_save_group(os.path.join(self.output_dir, 'ckpts'), self.step, payloads,
                           metadata={'models': list(self.models), 'ema_rates': self.ema_rate,
                                     'rng_scope': 'rank0 only; prefetch/worker state not captured',
                                     'world_size': self.world_size}, non_blocking=non_blocking)
+        # 记录已提交步数：run() 结束时据此判断是否需要补存最终 checkpoint
         self._last_committed_step = self.step
         print(' Done (complete marker committed).', flush=True)
 
@@ -442,6 +481,7 @@ class BasicTrainer:
         """
         Finetune from a checkpoint.
         Should be called by all processes.
+        从外部 checkpoint 初始化权重（键缺失或形状不符时跳过并告警，不报错）。
         """
         if self.is_master:
             print('\nFinetuning from:')
@@ -470,6 +510,7 @@ class BasicTrainer:
                 if missing or unexpected:
                     raise RuntimeError(f'Finetune checkpoint {name} mismatch: missing={missing}, unexpected={unexpected}')
                 # Dtype-only conversion must preserve exact LoRA FP32 values and
+                # 中文：这里只做 dtype 转换，必须保持 LoRA 的 FP32 数值与参数身份，并保留复数 buffer
                 # parameter identity, plus every complex computed buffer.
                 if self.mix_precision_mode == 'amp':
                     cast_model_preserving_lora_and_complex(model, self.mix_precision_dtype)
@@ -480,6 +521,7 @@ class BasicTrainer:
         self._state_dicts_to_master_params(self.master_params, model_ckpts)
         if self.is_master:
             for i, ema_rate in enumerate(self.ema_rate):
+                # EMA 副本也用同一份初始权重（EMA 只在 rank0 维护）
                 self._state_dicts_to_master_params(self.ema_params[i], model_ckpts)
         del model_ckpts
 
@@ -495,6 +537,7 @@ class BasicTrainer:
     def run_snapshot(self, num_samples, batch_size=4, verbose=False, **kwargs):
         """
         Run a snapshot of the model.
+        抽象方法：由各训练器实现具体采样，返回待可视化的样本字典。
         """
         pass
 
@@ -502,6 +545,7 @@ class BasicTrainer:
     def visualize_sample(self, sample):
         """
         Convert a sample to an image.
+        优先交给数据集自己的 visualize_sample；数据集没实现就原样返回。
         """
         if hasattr(self.dataset, 'visualize_sample'):
             return self.dataset.visualize_sample(sample)
@@ -512,6 +556,7 @@ class BasicTrainer:
     def snapshot_dataset(self, num_samples=100, batch_size=4):
         """
         Sample images from the dataset.
+        直接从数据集采样若干样本拼图保存（用于确认数据加载/对齐是否正确）。
         """
         dataloader = torch.utils.data.DataLoader(
             self.dataset,
@@ -549,6 +594,7 @@ class BasicTrainer:
         """
         Sample images from the model.
         NOTE: This function should be called by all processes.
+        快照流程：各进程分担样本 -> 可视化 -> 多卡 gather 到 rank0 -> 存图（rank0）。
         """
         if self.is_master:
             print(f'\nSampling {num_samples} images...', end='')
@@ -619,6 +665,7 @@ class BasicTrainer:
         """
         Update exponential moving average.
         Should only be called by the rank 0 process.
+        EMA 更新：ema = ema*rate + master*(1-rate)，只在 rank0 上做。
         """
         assert self.is_master, 'update_ema() should be called only by the rank 0 process.'
         for i, ema_rate in enumerate(self.ema_rate):
@@ -629,6 +676,7 @@ class BasicTrainer:
         """
         Check if DDP is working properly.
         Should be called by all process.
+        分块 all_gather 主参数并逐一比对，确认各进程参数完全一致（防止静默不同步）。
         """
         if self.is_master:
             print('\nPerforming DDP check...')
@@ -661,12 +709,14 @@ class BasicTrainer:
     def training_losses(**mb_data):
         """
         Compute training losses.
+        抽象方法：子类实现具体损失，返回 (loss 字典, status 字典)。
         """
         pass
 
     def load_data(self):
         """
         Load data.
+        取一个 batch 搬到设备；开启 prefetch 时提前预取下一批；再按 batch_split 切成子批（梯度累积用）。
         """
         if self.prefetch_data:
             if self._data_prefetched is None:
@@ -696,12 +746,14 @@ class BasicTrainer:
     def run_step(self, data_list):
         """
         Run a training step.
+        一个训练步：各子批前向+反向累积梯度 -> 梯度裁剪 -> 优化器更新 -> 日志/EMA。
         """
         step_log = {'loss': {}, 'status': {}}
         amp_context = partial(torch.autocast, device_type='cuda', dtype=self.mix_precision_dtype) if self.mix_precision_mode == 'amp' else nullcontext
         elastic_controller_context = self.elastic_controller.record if self.elastic_controller_config is not None else nullcontext
 
         # Train
+        # 累积各子批（batch_split）的损失；非最后一个子批用 no_sync 抑制 DDP 提前同步
         losses = []
         statuses = []
         elastic_controller_logs = []
@@ -727,6 +779,7 @@ class BasicTrainer:
             if self.elastic_controller_config is not None:
                 elastic_controller_logs.append(self.elastic_controller.log())
         ## gradient clip
+        # 先把梯度换算回真实尺度（AMP 缩放 / inflat_all 的 2^log_scale），再统一裁剪
         if self.grad_clip is not None:
             if self.mix_precision_mode == 'amp' and self.mix_precision_dtype == torch.float16:
                 self.scaler.unscale_(self.optimizer)
@@ -741,6 +794,8 @@ class BasicTrainer:
             if torch.isfinite(grad_norm):
                 statuses[-1]['grad_norm'] = grad_norm.item()
         ## step
+        # 按精度模式更新参数；inflat_all 下要自己处理缩放与溢出（log_scale 自适应），
+        # 梯度非有限就跳过本次更新（并降低 log_scale）
         if self.mix_precision_mode == 'amp' and self.mix_precision_dtype == torch.float16:
             prev_scale = self.scaler.get_scale()
             self.scaler.step(self.optimizer)
@@ -773,6 +828,7 @@ class BasicTrainer:
             else:
                 print('\n\033[93mWarning: NaN detected in gradients. Skipping update.\033[0m') 
         ## adjust learning rate
+        # 先记录当前 lr 再让调度器步进
         if self.lr_scheduler_config is not None:
             statuses[-1]['lr'] = self.lr_scheduler.get_last_lr()[0]
             self.lr_scheduler.step()
@@ -799,12 +855,14 @@ class BasicTrainer:
             step_log['param_grads'] = param_grads
 
         # Update exponential moving average
+        # 每步更新 EMA（仅 rank0）
         if self.is_master:
             self.update_ema()
 
         return step_log
 
     def save_logs(self):
+        # 追加写入 log.txt，并把本轮指标（跳过含 NaN 的项）汇总后写 TensorBoard
         log_str = '\n'.join([
             f'{step}: {json.dumps(dict_foreach(log, lambda x: float(x)))}' for step, log in self.log
         ])
@@ -822,6 +880,7 @@ class BasicTrainer:
     def check_abort(self):
         """
         Check if training should be aborted due to certain conditions.
+        中止条件：inflat_all 模式下 log_scale 降到 0 以下（说明数值发散），先存盘再抛错。
         """
         # 1. If log_scale in inflat_all mode is less than 0
         if self.mix_precision_dtype == torch.float16 and \
@@ -841,6 +900,7 @@ class BasicTrainer:
     def run(self):
         """
         Run training.
+        训练主循环：启动快照 -> 逐 step（取数据/训练/打印/DDP 校验/采样/日志/存盘）-> 收尾提交最终 checkpoint。
         """
         if self.is_master:
             print('\nStarting training...')
@@ -848,19 +908,24 @@ class BasicTrainer:
                 self.snapshot_dataset(batch_size=self.snapshot_batch_size)
             except Exception as e:
                 # Latent-only datasets (e.g. per-view SS LoRA) do not have
+                # 中文：纯潜变量数据集（例如按视角的 SS LoRA 数据）没有图像形状的 x_0，无法拼图，跳过即可
                 # image-shaped x_0 tensors suitable for torchvision grids.
                 print(f'[Snapshot] skipped dataset visualization: {e}', flush=True)
+        # 开始/恢复训练时先各出一张快照（数据集可声明 skip_snapshot 跳过）
         if not getattr(self.dataset, 'skip_snapshot', False):
             if self.step == 0:
                 self.snapshot(suffix='init', batch_size=self.snapshot_batch_size)
             else: # resume
                 self.snapshot(suffix=f'resume_step{self.step:07d}', batch_size=self.snapshot_batch_size)
 
+        # 计时与打印节流（速度/ETA 按 i_print 区间统计）
         time_last_print = 0.0
         time_elapsed = 0.0
+        # 主循环：断点恢复时 self.step 从已保存的步数继续
         while self.step < self.max_steps:
             time_start = time.time()
 
+            # 取一个 batch（按 batch_split 切好）并完成一次参数更新
             data_list = self.load_data()
             step_log = self.run_step(data_list)
 
@@ -882,10 +947,12 @@ class BasicTrainer:
                 time_last_print = time_elapsed
 
             # Check ddp
+            # 周期性 DDP 一致性自检
             if self.parallel_mode == 'ddp' and self.world_size > 1 and self.i_ddpcheck is not None and self.step % self.i_ddpcheck == 0:
                 self.check_ddp()
 
             # Sample images
+            # 周期性采样快照（数据集可用 snapshot_allowed 声明此阶段不允许采样）
             if self.step % self.i_sample == 0 and snapshot_allowed(self.dataset):
                 self.snapshot()
 
@@ -914,13 +981,16 @@ class BasicTrainer:
                     self.save_logs()
 
                 # Save checkpoint
+                # 周期性保存完整 checkpoint 组（仅 rank0）
                 if self.step % self.i_save == 0:
                     self.save()
                     
             # Check abort
+            # 发散检查（可能先存盘再抛错中止）
             self.check_abort()
 
         # A non-i_save-aligned max_steps must still have a committed final
+        # 中文：max_steps 未对齐 i_save 时也必须提交最终 checkpoint；已有 marker 则只校验、不覆盖旧步。
         # checkpoint. Never overwrite an old/partial step; helper fails closed.
         if self.is_master and getattr(self, '_last_committed_step', None) != self.step:
             ckpt_dir = os.path.join(self.output_dir, 'ckpts')
@@ -928,6 +998,7 @@ class BasicTrainer:
                 validate_checkpoint(ckpt_dir, self.step, verify_hashes=True)
             else:
                 self.save()
+        # 收尾快照（受数据集的 snapshot_allowed 契约控制）
         if snapshot_allowed(self.dataset, final=True):
             self.snapshot(suffix='final', batch_size=self.snapshot_batch_size)
         if self.world_size > 1:
@@ -939,6 +1010,7 @@ class BasicTrainer:
     def profile(self, wait=2, warmup=3, active=5):
         """
         Profile the training loop.
+        用 torch.profiler 采样若干步的开销，trace 写到 output_dir/profile。
         """
         with torch.profiler.profile(
             schedule=torch.profiler.schedule(wait=wait, warmup=warmup, active=active, repeat=1),

@@ -1,3 +1,10 @@
+"""PBR 网格渲染器：带材质与环境光贴图的真实感渲染（比 mesh_renderer 多了光照/后处理）。
+
+- latlong_to_cubemap + EnvMap 把经纬图环境贴图转成 cubemap 并支持漫反射/高光着色；
+- render 用 nvdiffrast 光栅化，支持多层剥离(peel_layers)处理透明度，
+  再叠加 SSAO、ACES tone mapping、gamma 校正输出 LDR 图。
+- 返回图像统一为 [C,H,W]；ssaa>1 时按放大分辨率渲染后再降采样。
+"""
 from typing import *
 import torch
 from easydict import EasyDict as edict
@@ -8,6 +15,7 @@ import torch.nn.functional as F
 
 
 def cube_to_dir(s, x, y):
+    # 立方体贴图第 s 个面对应的方向向量（x/y 为 [-1,1] 的面内坐标）
     if s == 0:   rx, ry, rz = torch.ones_like(x), -x, -y
     elif s == 1: rx, ry, rz = -torch.ones_like(x), x, -y
     elif s == 2: rx, ry, rz = x, y, torch.ones_like(x)
@@ -18,6 +26,7 @@ def cube_to_dir(s, x, y):
 
 
 def latlong_to_cubemap(latlong_map, res):
+    # 经纬(latlong)环境图 → 6 面 cubemap，逐面用方向向量反查经纬坐标采样
     if 'dr' not in globals():
         import nvdiffrast.torch as dr
     cubemap = torch.zeros(6, res[0], res[1], latlong_map.shape[-1], dtype=torch.float32, device='cuda')
@@ -36,6 +45,7 @@ def latlong_to_cubemap(latlong_map, res):
 
 
 class EnvMap:
+    """环境贴图：首次使用时懒加载 nvdiffrec 的 EnvironmentLight（含 mip 金字塔）。"""
     def __init__(self, image: torch.Tensor):
         self.image = image
         
@@ -101,6 +111,8 @@ def screen_space_ambient_occlusion(
 ) -> torch.Tensor:
     """
     Screen space ambient occlusion (SSAO)
+
+    用深度+法线在屏幕空间采样估计环境光遮蔽，输出 [H,W,1] 的遮蔽系数。
 
     Args:
         depth (torch.Tensor): [H, W, 1] depth image
@@ -191,6 +203,8 @@ class PbrMeshRenderer:
     """
     Renderer for the PBR mesh.
 
+    在 mesh_renderer 的基础上加环境光着色与 SSAO/色调映射后处理；
+    peel_layers 控制按深度逐层剥离的层数，用于渲染半透明材质。
     Args:
         rendering_options (dict): Rendering options.
         """

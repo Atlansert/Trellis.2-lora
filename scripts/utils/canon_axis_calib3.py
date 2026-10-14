@@ -3,6 +3,9 @@
 
 open3d 体素化产出**表面壳**，base 的 SS 输出是**实心**，直接比 IoU 上限很低。
 这里用 scipy.ndimage.binary_fill_holes 把 GT 壳填成实心后再比，信号干净得多。
+
+运行：无参数；需 GPU（默认卡 5），脚本内已 chdir 到项目根，ROOT 等为相对路径常量。
+安全边界：只读 GT npz、renders_cond 图与 base 权重，不写任何文件；纯标定实验。
 """
 import os
 import sys
@@ -30,12 +33,14 @@ VIEWS = [0, 4, 8, 12, 16, 20]
 
 
 def main():
+    """对若干对象/视角：base 采样出占据体，与"按置换 p 摆放并填洞"的 GT 比 IoU；6 种置换取均值最高者为解。"""
     pipe = Trellis2ImageTo3DPipeline.from_pretrained('checkpoints')
     pipe.cuda()
     objs = sorted(os.listdir(f'{ROOT}/{VOX}'))[:N_OBJ]
     perms = list(itertools.permutations(range(3)))
 
     def gt_solid(path, perm):
+        """读 GT 体素，按置换 perm 重排轴并填洞成实心（这样才和 base 的实心占据体可比）。"""
         c = np.load(path)['coords'].astype(np.int64)
         x = np.zeros((64, 64, 64), bool)
         if len(c):
@@ -44,6 +49,7 @@ def main():
         return ndimage.binary_fill_holes(x)
 
     def iou(a, b):
+        """体素 IoU；两者都空时定义为 0。"""
         u = (a | b).sum()
         return float((a & b).sum()) / u if u else 0.0
 

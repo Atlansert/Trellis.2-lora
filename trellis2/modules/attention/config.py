@@ -1,6 +1,13 @@
+"""注意力后端全局配置（dense 版）。
+
+BACKEND 决定 scaled_dot_product_attention 走哪个实现：xformers / flash_attn /
+flash_attn_3 / sdpa（PyTorch 原生）/ naive（纯手写，仅调试用）。
+导入本模块时即从环境变量读取一次：ATTN_BACKEND、ATTN_DEBUG=1。
+"""
+
 from typing import *
 
-BACKEND = 'flash_attn' 
+BACKEND = 'flash_attn'  # 默认后端
 DEBUG = False
 
 def __from_env():

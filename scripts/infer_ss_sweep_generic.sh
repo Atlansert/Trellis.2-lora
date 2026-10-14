@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：通用 SS LoRA 扫描推理：指定 ckpt 目录中某一档步数，shape flow 固定用 v2 的 20k，只跑 data_test/001.png。
+# 用法：bash scripts/infer_ss_sweep_generic.sh <ckpt_dir> <SS步数> <gpu> <tag>。
+# 输出：results_infer/sweep_<tag>_<step>_shape20k/（001.glb、run.log、infer.log）；已有 001.glb 则跳过。
+# 边界：会 mkdir 输出目录并调用 infer_finetuned.py（GPU 推理、--no_video）；权重缺失退出 2，无输出 GLB 退出 3。
 # 通用推理扫描：<SS LoRA 所在目录> 的 10k..50k，每 10k 一档，shape flow 固定 20k。
 #
 # Usage: infer_ss_sweep_generic.sh <ckpt_dir> <step> <gpu> <tag>

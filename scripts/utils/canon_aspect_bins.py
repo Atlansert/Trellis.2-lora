@@ -6,6 +6,9 @@
 
 不必读渲染图：体素侧视度 r = max(E0,E1)/E2 与渲染剪影宽高比高度相关（实测 0.971），
 可直接作为宽高比的代理。统计用**置换后**（管线约定）的轴。
+
+运行：无参数（ROOT/VOX 为文件内常量，按当前工作目录解析，需在项目根下执行）。
+安全边界：只读 ss_view_voxels_canon_v4/*.npz，不写文件；判据：某区间 index1 占比 >95% 视为无歧义定帧。
 """
 import glob
 import os
@@ -21,6 +24,7 @@ BINS = [(0, 1.5), (1.5, 2.5), (2.5, 3.5), (3.5, 4.5), (4.5, 6.0), (6.0, 1e9)]
 
 
 def main():
+    """按侧视度 r 分箱统计"置换后最长轴"的分布，判断该宽高比区间能否无歧义定帧；返回 0。"""
     objs = sorted(os.listdir(os.path.join(ROOT, VOX)))
     table = {b: Counter() for b in BINS}
     n = 0
@@ -30,8 +34,9 @@ def main():
             if not len(c):
                 continue
             raw = c.max(0) - c.min(0) + 1
+            # 侧视度在原始轴下计算：max(E0,E1)/E2（E2=竖直），作为渲染剪影宽高比的代理。
             r = max(raw[0], raw[1]) / max(raw[2], 1)
-            c2 = c[:, PERM]
+            c2 = c[:, PERM]          # 置换到管线约定后再统计最长轴
             e = c2.max(0) - c2.min(0) + 1
             ax = 'xyz'[int(np.argmax(e))]
             for b in BINS:

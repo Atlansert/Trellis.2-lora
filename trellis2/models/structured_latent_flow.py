@@ -1,3 +1,10 @@
+"""SLat（结构化潜变量）的 flow matching 主干：在稀疏 latent 上做去噪。
+
+- 输入 x 是 SparseTensor（coords 为 (batch, x, y, z)，feats 为 latent 通道），输出同结构。
+- cond 可以是普通张量或张量列表（列表会打包成 VarLenTensor，用于变长条件，如多视图特征）。
+- concat_cond 非空时按通道拼到 x 上（例如把结构/几何条件直接喂给网络）。
+- ElasticSLatFlowModel 在此基础上叠加显存弹性（按 mem_ratio 开关 activation checkpoint）。
+"""
 from typing import *
 from functools import partial
 import torch
@@ -13,6 +20,7 @@ from .sparse_elastic_mixin import SparseTransformerElasticMixin
     
 
 class SLatFlowModel(nn.Module):
+    """稀疏 SLat 的 DiT 主干，结构与 SS flow 相同但所有线性层换成稀疏版本。"""
     def __init__(
         self,
         resolution: int,
@@ -175,8 +183,10 @@ class SLatFlowModel(nn.Module):
         **kwargs
     ) -> sp.SparseTensor:
         if concat_cond is not None:
+            # 通道维拼接额外条件（如结构 latent），要求两者坐标一致
             x = sp.sparse_cat([x, concat_cond], dim=-1)
         if isinstance(cond, list):
+            # 变长条件打包成 VarLenTensor，供稀疏 cross-attention 使用
             cond = sp.VarLenTensor.from_tensor_list(cond)
 
         h = self.input_layer(x)
@@ -188,6 +198,7 @@ class SLatFlowModel(nn.Module):
         cond = manual_cast(cond, self.dtype)
 
         if self.pe_mode == "ape":
+            # 用稀疏坐标（跳过 batch 列）查绝对位置编码，只对有体素的位置生效
             pe = self.pos_embedder(h.coords[:, 1:])
             h = h + manual_cast(pe, self.dtype)
         for block in self.blocks:
@@ -199,6 +210,7 @@ class SLatFlowModel(nn.Module):
         return h
 
 
+# 低显存训练用：复用 SparseTransformerElasticMixin 的分 block checkpoint 机制
 class ElasticSLatFlowModel(SparseTransformerElasticMixin, SLatFlowModel):
     """
     SLat Flow Model with elastic memory management.

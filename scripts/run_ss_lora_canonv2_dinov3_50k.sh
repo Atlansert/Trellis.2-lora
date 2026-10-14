@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：Stage1（SS）LoRA 训练，用"逐对象朝向规范化后"的数据 ss_latents_views_canon + renders_cond_t，50k 步。
+# 用法：bash scripts/run_ss_lora_canonv2_dinov3_50k.sh [GPU 号，默认 4]。
+# 输出：results/multiview_1186_ss_flow_lora_64_views_canonv2/。
+# 边界：长跑 GPU 训练任务，持续写该输出目录；口径与 A run 一致（DINOv3@512、crop 1.0、r8/a8）以便对比。
 # Stage1 SS LoRA —— **逐对象朝向规范化后的数据**（治本方案，2026-10-11）。
 #
 # 数据来源 training_data/multiview_1186/ss_latents_views_canon：

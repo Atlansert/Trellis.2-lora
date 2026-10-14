@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：Stage1 SS LoRA 300000 + Stage2 shape LoRA（EMA 1000..8000 逐档）串行推理，data_test 全量，单卡 GPU 7。
+# 用法：bash scripts/inference_history/infer_stage1_0300000_stage2_1000_8000_gpu7.sh（无参数）。
+# 输出：results_infer/data_test_stage1_lora_0300000_stage2_lora_1024_1000_8000/step00NNNN/（GLB、infer.log），总日志 run.log。
+# 边界：会 mkdir 输出目录并跑 GPU 推理（--no_video）；缺 stage1 权重退 2，某档 GLB 不足退 3。
 # Combined inference: Stage-1 SS LoRA (step 300000) + Stage-2 shape-flow LoRA
 # (EMA steps 1000..8000) on data_test, single GPU (7), sequential.
 # Output: results_infer/data_test_stage1_lora_0300000_stage2_lora_1024_1000_8000/step00NNNN

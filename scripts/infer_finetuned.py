@@ -20,6 +20,11 @@
 
     # 纯官方基线，不自动加载 results/latest_* 下的微调权重
     python scripts/infer_finetuned.py --image input.png --output output/ --pretrained_only
+
+安全边界:
+    - 只读图片/权重；所有产物都写进 --output 目录，且该目录若已存在 run_manifest.json 会直接报错（防覆盖旧 run）。
+    - 权重与图片路径在碰 GPU 之前先做存在性预检；LoRA 走 strict 校验（150 层），不匹配即失败。
+    - 需要 CUDA；默认 CUDA_VISIBLE_DEVICES=7，显式设置则不覆盖。不会改动任何权重文件。
 """
 
 import os
@@ -105,7 +110,9 @@ def load_finetuned_weights(pipeline, vae_decoder_path=None, flow_512_path=None,
 
 def infer_single(image_path, pipeline, output_dir, seed, envmap=None, max_faces=16777216,
                  no_video=False, geometry_only=False, fast_glb=False, timings=None):
-    """处理单张图片"""
+    """处理单张图片：跑 pipeline -> 简化 -> 导出产物，返回 (video_path|None, glb/ply path)。
+    geometry_only 出无 UV 的 .ply、fast_glb 出无纹理 .glb（都不算正式验收产物）；timings 记录各阶段耗时。
+    """
     name = os.path.splitext(os.path.basename(image_path))[0]
     print(f"\n  推理: {name}")
 
@@ -180,6 +187,9 @@ def infer_single(image_path, pipeline, output_dir, seed, envmap=None, max_faces=
 _ACTIVE_RUN = None
 
 def main():
+    """推理主流程：参数/路径预检 -> 建 output 与 run_manifest(v2) -> 自动探测 latest 权重 ->
+    加载 pipeline、替换微调权重 -> 逐图推理（每图失败都记进 manifest 并让退出码非 0）。
+    """
     global _ACTIVE_RUN
     parser = argparse.ArgumentParser(description='TRELLIS.2 微调模型推理')
     # 输入
@@ -260,6 +270,7 @@ def main():
     if opt.pretrained_only and (opt.vae_only or explicit):parser.error('pretrained_only cannot combine with any explicit fine-tuned weights')
     if opt.vae_only and (opt.flow_512 or opt.flow_512_lora):parser.error('vae_only conflicts with explicit 512 flow weights')
     # All argument/input failures precede pipeline construction or GPU allocation.
+    # 所有参数/输入校验都放在构建 pipeline 与申请显存之前。
     for rank in [opt.lora_rank,opt.ss_lora_rank,opt.shape_lora_rank,opt.tex_lora_rank]:
         if rank is not None and rank<=0:parser.error('LoRA rank must be positive')
     for alpha in [opt.lora_alpha,opt.ss_lora_alpha,opt.shape_lora_alpha,opt.tex_lora_alpha]:
@@ -272,6 +283,7 @@ def main():
     manifest_path=os.path.join(opt.output,'run_manifest.json')
     if os.path.exists(manifest_path):raise FileExistsError('existing run_manifest.json: use a fresh output directory')
     hashes=HashCache()
+    # 先落盘 status=loading 的骨架 manifest，再用真实权重哈希逐次原子更新（失败也能留下证据）。
     manifest={'schema':'trellis.inference-run.v2','status':'loading','flags':vars(opt).copy(),
               'seed':opt.seed,'pipeline_type':opt.pipeline_type,'export':export_metadata(opt.geometry_only,opt.fast_glb),
               'explicit_weights':{k:hashes.record(v) for k,v in explicit.items()},'images':[],
@@ -378,6 +390,7 @@ def main():
 
     manifest['loaded_components']=loaded
     manifest['actual_coordinate_flags']={'ss_canonicalize':bool(pipeline.ss_canonicalize),'ss_swap_yz':bool(pipeline.ss_swap_yz)}
+    # 开过坐标修正或 raw 导出就不算正式验收；evaluate_fixed_frame 据此拒绝。
     manifest['acceptance_flags_eligible']=not(pipeline.ss_canonicalize or pipeline.ss_swap_yz or opt.geometry_only or opt.fast_glb)
     manifest['samplers']={k:getattr(pipeline,k,None) for k in ['sparse_structure_sampler_params','shape_slat_sampler_params','tex_slat_sampler_params']}
     write_manifest(manifest_path,manifest)
@@ -390,6 +403,7 @@ def main():
     envmap = None if opt.no_video or opt.geometry_only or opt.fast_glb else EnvMap(torch.ones(256, 512, 3, dtype=torch.float32, device='cuda') * 0.5)
 
     # A failed image is recorded and any partial failure returns nonzero.
+    # 单图失败会被记进 manifest，最终只要有失败就返回非 0（批量跑不会被静默吞掉）。
     def runner(path,timings):
         return infer_single(path,pipeline,opt.output,seed=opt.seed,envmap=envmap,
                             max_faces=opt.max_faces,no_video=opt.no_video,
@@ -403,6 +417,7 @@ if __name__ == '__main__':
     try:
         sys.exit(main())
     except Exception as e:
+        # 任何未捕获异常都要把 run_manifest 收尾成 failed 并落盘，再以非 0 退出。
         if _ACTIVE_RUN is not None:
             path,manifest=_ACTIVE_RUN
             manifest.update(status='failed',run_error=f'{type(e).__name__}: {e}',finished_utc=__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat())

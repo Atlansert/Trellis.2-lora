@@ -1,3 +1,8 @@
+"""体素(Voxel)渲染器：用 o_voxel 的光栅化器把体素属性投影成多视图图片。
+
+render 返回 depth/alpha，以及颜色：colors_overwrite 给出时是 (3,H,W) 的覆盖色，
+否则按 voxel.layout 的字段切片逐个返回（如 base_color 等）。
+"""
 import torch
 from easydict import EasyDict as edict
 from ..representations import Voxel
@@ -49,6 +54,7 @@ class VoxelRenderer:
             import o_voxel
         renderer = o_voxel.rasterize.VoxelRenderer(self.rendering_options)
         positions = voxel.position
+        # 没有指定覆盖色时直接渲染体素属性，否则用外部颜色替换
         attrs = voxel.attrs if colors_overwrite is None else colors_overwrite
         voxel_size = voxel.voxel_size
         

@@ -1,3 +1,11 @@
+"""弹性显存训练：按输入规模自动调节 activation checkpoint 比例，把显存压在目标水位下。
+
+- MemoryController 记录 (输入规模, mem_ratio, 实测峰值显存) 样本，估计显存模型。
+- LinearMemoryController 用 memory = k*input_size*mem_ratio + b 线性拟合（buffer 内最近样本），
+  再由目标显存反解出本次该用的 mem_ratio（上限 _max_mem_ratio 逐步放开到 1.0）。
+- ElasticModule / ElasticModuleMixin 在训练且开梯度时按控制器给的 mem_ratio 前向，
+  推理或不需要梯度时退化为普通前向；具体的省显存手段由子类的 with_mem_ratio 实现。
+"""
 from abc import abstractmethod
 from contextlib import contextmanager
 from typing import Tuple
@@ -89,6 +97,7 @@ class LinearMemoryController(MemoryController):
         self._last_input_size = None
         self._last_mem_ratio = []
         yield
+        # 前向结束后采集本次峰值显存与实际 mem_ratio，作为拟合样本
         self._last_memory = torch.cuda.max_memory_allocated(self.device) / 1024**3
         self._last_mem_ratio = sum(self._last_mem_ratio) / len(self._last_mem_ratio)
         self._add_sample(self._last_memory, self._last_input_size, self._last_mem_ratio)
@@ -122,6 +131,7 @@ class LinearMemoryController(MemoryController):
         plt.cla()
         
     def get_mem_ratio(self, input_size):
+        # 由 memory = k*x + b 反解使显存接近 target_ratio*可用显存 的 mem_ratio
         k, b = self._params
         if k == 0: return np.random.rand() * self._max_mem_ratio
         pred = (self.available_memory * self.target_ratio - b) / (k * input_size)

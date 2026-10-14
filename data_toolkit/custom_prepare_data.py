@@ -324,6 +324,7 @@ def prepare_condition_images(image_paths, sha256, output_dir, image_size=1024):
             ]
         }
         if angle_deg is not None:
+            # 契约：带 yaw_deg 的帧才是渲染视角（下游按 i*15° 校验）；真实图不带 yaw_deg。
             frame["yaw_deg"] = angle_deg
         else:
             real_count += 1
@@ -366,6 +367,7 @@ def refresh_real_condition_images(image_paths, sha256, output_dir):
             continue
         Image.open(src_path).convert('RGBA').save(os.path.join(cond_dir, dst_name))
         transforms['frames'].append({
+            # 真实图用单位朝向矩阵占位并标 is_real=True：只作为条件输入，不参与视角序列校验。
             'file_path': dst_name,
             'camera_angle_x': 0.523599,
             'is_real': True,
@@ -384,6 +386,8 @@ def refresh_real_condition_images(image_paths, sha256, output_dir):
     return len(transforms['frames'])
 
 
+# CLI 入口：子目录模式（默认）或 --flat；--conditions-only 只增量刷新 renders_cond 与条件图字段，
+# 不重建 dual grid / mesh dump（因此在无 GPU 的机器上也能跑）。
 def main():
     parser = argparse.ArgumentParser(description='自定义数据预处理 (无 Blender)')
     parser.add_argument('--data_dir', type=str, required=True,

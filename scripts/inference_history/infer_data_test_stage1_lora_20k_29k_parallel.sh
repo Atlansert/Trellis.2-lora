@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：Stage1 SS LoRA 的 EMA 20000..29000 各步数并行推理（轮转分配到 4/5/6/7 四张卡），Stage2 保持预训练。
+# 用法：bash scripts/inference_history/infer_data_test_stage1_lora_20k_29k_parallel.sh（无参数）。
+# 输出：results_infer/data_test_stage1_lora_stage2_pretrained_1024_20k_29k/step0NNNNN/（GLB、infer.log），总日志 run.log。
+# 边界：会 mkdir 输出目录并起多个 GPU 推理进程；某档权重缺失只记错并返回失败，不影响其它档。
 # Parallel Stage-1 LoRA inference for EMA steps 20000..29000 on data_test.
 # Distributes checkpoints round-robin across the four free GPUs (4,5,6,7).
 # Output: results_infer/data_test_stage1_lora_stage2_pretrained_1024_20k_29k/step0NNNNN

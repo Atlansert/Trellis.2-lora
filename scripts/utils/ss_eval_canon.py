@@ -6,6 +6,9 @@
 
 判据（规范化后的数据已对齐到管线约定）：
   正确 ⇔ SS 占据体长轴 = index1（成品 GLB 长度轴 = z）。
+
+CLI: --ckpts tag=path ...（可多个）[--images 001..004] [--seeds 42..] [--canonicalize 对照用]
+输出：stdout 的逐图朝向分布/明确正确率；只读，不写文件；需 GPU（默认卡 5）。
 """
 import argparse
 import os
@@ -31,6 +34,7 @@ P = dict(steps=12, guidance_strength=7.5, guidance_rescale=0.7,
 
 
 def main():
+    """对每个 tag=path 检查点，在 data_test 上跑多种子 SS 采样，统计朝向分布与"明确正确率"（E1/max(E0,E2)>1.5）。"""
     ap = argparse.ArgumentParser()
     ap.add_argument('--ckpts', nargs='+', required=True, help='tag=path ...')
     ap.add_argument('--images', nargs='+', default=['001', '002', '003', '004'])

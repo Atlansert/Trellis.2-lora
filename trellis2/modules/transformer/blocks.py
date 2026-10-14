@@ -1,3 +1,11 @@
+"""dense Transformer block（用于图像/序列等常规 token 序列，非稀疏）。
+
+TransformerBlock：MSA + FFN，pre-norm 残差，可选用 RoPE（需外部传入 phases）。
+TransformerCrossBlock：self-attn + cross-attn + FFN，context 为条件序列 [B, Lkv, ctx_channels]。
+AbsolutePositionEmbedder：坐标 -> sin/cos 位置编码（每维 freq_dim = C//in_channels//2 个频率，
+不足 C 维的部分补 0）。
+"""
+
 from typing import *
 import torch
 import torch.nn as nn
@@ -9,6 +17,7 @@ class AbsolutePositionEmbedder(nn.Module):
     """
     Embeds spatial positions into vector representations.
     """
+    # 输出 (N, channels)：各坐标维独立编码后拼接
     def __init__(self, channels: int, in_channels: int = 3):
         super().__init__()
         self.channels = channels
@@ -47,6 +56,7 @@ class AbsolutePositionEmbedder(nn.Module):
 
 
 class FeedForwardNet(nn.Module):
+    """dense FFN：C -> C*mlp_ratio -> C（两点线性 + GELU）。"""
     def __init__(self, channels: int, mlp_ratio: float = 4.0):
         super().__init__()
         self.mlp = nn.Sequential(
@@ -63,6 +73,7 @@ class TransformerBlock(nn.Module):
     """
     Transformer block (MSA + FFN).
     """
+    # x: [B, L, C]；phases 仅为 RoPE 相位，非 RoPE 时传 None
     def __init__(
         self,
         channels: int,
@@ -108,6 +119,7 @@ class TransformerBlock(nn.Module):
         return x
 
     def forward(self, x: torch.Tensor, phases: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # use_checkpoint：以重算前向换显存
         if self.use_checkpoint:
             return torch.utils.checkpoint.checkpoint(self._forward, x, phases, use_reentrant=False)
         else:
@@ -118,6 +130,7 @@ class TransformerCrossBlock(nn.Module):
     """
     Transformer cross-attention block (MSA + MCA + FFN).
     """
+    # ctx_channels 为条件特征维；cross_attn 固定 full 模式
     def __init__(
         self,
         channels: int,
@@ -167,6 +180,7 @@ class TransformerCrossBlock(nn.Module):
         )
 
     def _forward(self, x: torch.Tensor, context: torch.Tensor, phases: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # 三段残差：self-attn -> cross-attn(context) -> mlp
         h = self.norm1(x)
         h = self.self_attn(h, phases=phases)
         x = x + h

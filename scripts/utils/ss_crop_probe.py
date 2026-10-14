@@ -4,6 +4,9 @@
 旧 run 训练时 crop_scale≈1.2（物体四周留边距），新 run 与推理默认都是 1.0（占满画面）。
 条件编码器已确认是主因候选，这里固定 DINOv3@512，只改裁剪口径，看旧检查点是否
 从"一致 h-long"变成"随输入摇摆"。
+
+运行：无参数；需 GPU（默认 CUDA_VISIBLE_DEVICES=5，已显式设置则不覆盖），脚本内已 chdir 到项目根。
+安全边界：只读 checkpoints/权重与 data_test/*.png，不写任何文件；纯探针实验，不产出 checkpoint。
 """
 import os
 import sys
@@ -33,6 +36,7 @@ IMGS = ['001', '002', '003', '004']
 
 
 def main():
+    """固定 DINOv3 条件编码器，只切换裁剪口径 (1.0/1.2) 采样 SS，比较各权重在 4 张测试图上的长轴是否一致。"""
     pipe = Trellis2ImageTo3DPipeline.from_pretrained('checkpoints')
     pipe.cuda()
     ss = pipe.models['sparse_structure_flow_model']
@@ -42,6 +46,7 @@ def main():
              for n in IMGS for c in CROPS}
 
     def occ(cond):
+        """按固定种子(42)采样 SS 占据体，把 coords 反填成 64³ 布尔体素。"""
         torch.manual_seed(42)
         co = pipe.sample_sparse_structure(cond, 64, 1, dict(P)).cpu().numpy()
         o = np.zeros((64, 64, 64), bool)
@@ -50,6 +55,7 @@ def main():
         return o
 
     def desc(o):
+        """返回占据体最长跨度所在轴（'x'/'y'/'z'）；空占据体返回 'empty'。"""
         nz = np.argwhere(o)
         if not len(nz):
             return 'empty'
@@ -60,9 +66,9 @@ def main():
     print('-' * 56)
     for tag, ck in CKS:
         sd = torch.load(ck, map_location='cpu', weights_only=True)
-        sd.pop('rope_phases', None)
-        apply_lora_to_linear_layers(ss, TARGETS, rank=8, alpha=8.0, dropout=0.0)
-        ss.load_state_dict(sd, strict=False)
+        sd.pop('rope_phases', None)          # 运行时生成的 buffer，历史权重里没有，不该覆盖
+        apply_lora_to_linear_layers(ss, TARGETS, rank=8, alpha=8.0, dropout=0.0)   # 先注入 LoRA 层
+        ss.load_state_dict(sd, strict=False)  # 探针用宽松加载；正式推理入口走严格校验
         for c in CROPS:
             axs = [desc(occ(conds[(n, c)])) for n in IMGS]
             ok = '一致' if len(set(axs)) == 1 else f'摇摆({len(set(axs))} 种)'

@@ -8,6 +8,9 @@
 
 评分：把 GT 占据体沿视深轴投影成剪影，与渲染图 alpha 剪影（按前景 bbox 归一化）
 算 IoU；同时算"GT 左右翻转"后的 IoU。正确候选应当**未翻转的 IoU 最高**。
+
+运行：无参数（固定 5 个对象 × 6 个视角，常量在文件内）；脚本内已 chdir 到项目根。
+安全边界：只读 mesh_dumps 与 renders_cond_t，不写文件；纯 CPU 体素化打分，不需要 GPU。
 """
 import os
 import sys
@@ -29,12 +32,14 @@ RES = 64
 
 
 def rz(deg):
+    """绕 Z 轴旋转 deg 度的 3×3 矩阵。"""
     a = np.deg2rad(deg)
     c, s = np.cos(a), np.sin(a)
     return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], float)
 
 
 def mesh_of(o):
+    """从 mesh_dumps/<obj>.pickle 读出该对象的全部网格并合并为 (顶点, 面)，面索引按顶点偏移拼接。"""
     import pickle
     d = pickle.load(open(f'{ROOT}/mesh_dumps/{o}.pickle', 'rb'))
     V, F, off = [], [], 0
@@ -47,6 +52,7 @@ def mesh_of(o):
 
 
 def vox(V, F, yaw, M, offset):
+    """按轴映射 M、环绕角 (yaw-offset) 把网格体素化成 64³ 占据体（open3d within_bounds，单位立方体内）。"""
     vv = (V * np.array(M)) @ rz(yaw - offset)
     m = o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(vv),
                                   o3d.utility.Vector3iVector(F))
@@ -61,6 +67,7 @@ def vox(V, F, yaw, M, offset):
 
 
 def crop_norm(mask):
+    """按前景 bbox 裁切后缩放到 RES×RES 的布尔剪影（统一尺寸才能与渲染剪影比 IoU）；前景太少返回全空。"""
     ys, xs = np.nonzero(mask)
     if len(xs) < 4:
         return np.zeros((RES, RES), bool)
@@ -69,11 +76,13 @@ def crop_norm(mask):
 
 
 def iou(a, b):
+    """布尔剪影 IoU；两者都空时返回 0。"""
     u = (a | b).sum()
     return float((a & b).sum()) / u if u else 0.0
 
 
 def main():
+    """遍历候选变换（2 种轴置换 × 8 种符号 × 2 个环绕角偏移），用"GT 投影剪影 vs 渲染剪影"的 IoU 排序输出最优解。"""
     renders = {}
     for o in OBJS:
         for v in VIEWS:
@@ -81,6 +90,7 @@ def main():
             a = np.array(Image.open(fp).convert('RGBA').getchannel('A')) > 128
             renders[(o, v)] = crop_norm(a.T)          # (x, y) 与 GT 投影同序
 
+    # 候选空间：2 种轴置换 × 8 种符号组合 × 2 个环绕角偏移(270/90，差 180°)。
     cands = []
     for perm, signs in itertools.product([(0, 2, 1), (2, 0, 1)], itertools.product([1, -1], repeat=3)):
         for offset in (270.0, 90.0):

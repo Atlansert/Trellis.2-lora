@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""CPU fixed-world-frame diagnostics, never an automatic geometry fidelity gate.
+"""固定帧（fixed world frame）验收诊断：纯 CPU，只做诊断，不是自动的几何保真闸门。
+
+用途：对已有推理产物按"固定世界坐标 + 标准 GLB 契约"复核朝向/几何，并校验 run_manifest 溯源链。
+关键输入：--root（内置历史清单）或 --manifest（外部清单）+ --manual-reviews；关键输出：<output>/report.json 与 input_manifest.json。
+要点：只接受 formal 标准 GLB（raw fast_glb/geometry_only 帧契约不同，直接判 fail）；长度轴应为 Z；PCA 用表面面积积分协方差；10° 只是诊断参考阈值，不是生产验收规则。
+三态结论：pass / fail / unverified —— 溯源不可证或 PCA 轴歧义时保持 unverified，绝不靠几何好看"升级"为 pass。
+安全边界：只读 GLB/日志/manifest，只写 --output 目录（目录已存在则报错）；不做网格形变、不做最佳视角搜索、不加载 checkpoint 张量。
+
+Original (English):
+CPU fixed-world-frame diagnostics, never an automatic geometry fidelity gate.
 
 Standard GLB only: raw fast_glb/geometry_only exports require their own frame
 contract and are rejected. No PCA alignment, best-view search, or mesh mutation.
@@ -11,13 +20,16 @@ import numpy as np
 import trimesh
 
 def sha256(path):
+    """分块计算文件 sha256（不整文件读进内存）。"""
     h=hashlib.sha256()
     with open(path,'rb') as f:
         for block in iter(lambda:f.read(1024*1024),b''):h.update(block)
     return h.hexdigest()
 
 def world_mesh(scene):
-    """Apply every scene instance's full world transform, including duplicates."""
+    """Apply every scene instance's full world transform, including duplicates.
+    把场景里每个实例的世界变换都应用后合并成一个网格（重复实例也算），得到固定世界帧下的真实几何。
+    """
     if isinstance(scene,trimesh.Trimesh):return scene.copy()
     meshes=[]
     for node in scene.graph.nodes_geometry:
@@ -29,6 +41,9 @@ def world_mesh(scene):
     return trimesh.util.concatenate(meshes)
 
 def mesh_metrics(mesh,reference_angle=10):
+    """固定帧几何度量：AABB 跨度 + 表面面积积分协方差 PCA 主方向(判断长度轴是否落在 Z)。
+    退化面按相对面积容差剔除；PCA 主/次特征值比 <1.5 记为轴歧义；返回朝向参考状态 pass/fail。
+    """
     v=np.asarray(mesh.vertices,dtype=np.float64);f=np.asarray(mesh.faces)
     if not len(v) or not len(f):raise ValueError('empty mesh vertices/faces')
     if not np.isfinite(v).all():raise ValueError('nonfinite vertices')
@@ -53,6 +68,7 @@ def mesh_metrics(mesh,reference_angle=10):
     # Exact uniform-triangle surface moments via law of total covariance.
     # Within-triangle covariance = sum_i (v_i-c)(v_i-c)^T / 12.
     # Keeping this term makes moments invariant to coplanar tessellation.
+    # 面内协方差项(全协方差定律)：加上它，度量对共面三角化的疏密不敏感。
     surface_cov=cov.copy()
     for i in range(3):
         residual=triangles[valid,i,:]-centers
@@ -62,6 +78,7 @@ def mesh_metrics(mesh,reference_angle=10):
     if surface_direction[2]<0:surface_direction=-surface_direction
     surface_offangle=float(np.degrees(np.arccos(np.clip(abs(surface_direction[2]),0,1))))
     surface_gap=float(surface_eigenvalues[-1]/max(surface_eigenvalues[-2],np.finfo(float).tiny))
+    # 朝向参考判据：最长 AABB 轴必须是 Z(下标 2)，且表面 PCA 主轴与 Z 的夹角不超过参考阈值。
     longest=int(np.argmax(extents));orientation='pass' if longest==2 and surface_offangle<=reference_angle else 'fail'
     return {'finite':True,'vertices':len(v),'faces':len(f),'degenerate_faces':degenerate,
             'degenerate_area_tolerance':tolerance,'aabb':bounds.tolist(),'extents_xyz':extents.tolist(),
@@ -84,6 +101,7 @@ def mesh_metrics(mesh,reference_angle=10):
             'orientation_reference_status':orientation,'reference_angle_degrees':reference_angle}
 
 def log_provenance(path):
+    """读取推理日志的溯源摘要：文件哈希、"加载 ...pt/safetensors" 行、是否出现 Traceback/错误标记。"""
     p=Path(path)
     if not p.is_file():return {'status':'missing','path':str(p)}
     text=p.read_text(encoding='utf-8',errors='replace')
@@ -92,20 +110,27 @@ def log_provenance(path):
             'error_marker_present':bool(re.search(r'Traceback|错误:|Error:',text))}
 
 class UnsafeRunContract(ValueError):
+    """契约本身不安全（raw 导出/坐标修正等），判 fail；与"暂时证不了"的 unverified 区分开。"""
     pass
 
 def hash_record_metadata(value):
+    """校验一条哈希记录：path 存在、size_bytes 未变、sha256 为 64 位十六进制。checkpoint 载荷不重算。"""
     if not isinstance(value,dict) or not value.get('path') or not re.fullmatch(r'[0-9a-f]{64}',value.get('sha256','')):raise ValueError('incomplete hash record')
     path=Path(value['path'])
     if not path.is_file() or value.get('size_bytes')!=path.stat().st_size:raise ValueError('recorded source missing/size changed')
 
 def verify_native_run_manifest(record,evidence,path,artifact_hash):
+    """校验原生 trellis.inference-run.v2 manifest（v2 溯源）：
+    seed/pipeline 必须为 42/1024，坐标与导出开关必须为安全值，base 与解析权重都要有完整哈希记录，
+    且目标 GLB 在记录里唯一、其路径/哈希/大小与输入图片哈希都能对上现有文件。
+    """
     if evidence.get('status')!='success':raise ValueError('inference run not successful')
     flags=evidence.get('options',evidence.get('flags',{}))
     seed=flags.get('seed',evidence.get('seed'));pipeline=flags.get('pipeline_type',evidence.get('pipeline_type'))
     if seed!=42 or str(pipeline)!='1024':raise ValueError('seed/pipeline acceptance contract mismatch')
     if evidence.get('seed',seed)!=seed or str(evidence.get('pipeline_type',pipeline))!=str(pipeline):raise ValueError('inconsistent seed/pipeline evidence')
     actual=evidence.get('actual_coordinate_flags',{})
+    # 出现任何"raw 导出 / 坐标修正(ss_canonicalize, ss_swap_yz)"痕迹 -> 契约不安全，判 fail 而非 unverified。
     if any(actual.get(k) is True for k in ['ss_canonicalize','ss_swap_yz']) or any(flags.get(k) is True for k in ['ss_canonicalize','ss_swap_yz','fast_glb','geometry_only']) or evidence.get('export',{}).get('mode')=='raw_no_remesh':
         raise UnsafeRunContract('explicit raw export or coordinate correction not accepted')
     if any(actual.get(k) is not False for k in ['ss_canonicalize','ss_swap_yz']):raise ValueError('actual coordinate flags missing/unsafe')
@@ -123,6 +148,7 @@ def verify_native_run_manifest(record,evidence,path,artifact_hash):
     loaded=evidence.get('loaded_components')
     if not isinstance(loaded,list):raise ValueError('loaded components missing')
     if any(key not in loaded for key in resolved):raise ValueError('resolved override not actually loaded')
+    # 目标 GLB 必须在 manifest 中恰好对应一条 success 记录，避免多图/多产物串台。
     images=[x for x in evidence.get('images',[]) if x.get('status')=='success' and any(Path(o.get('path','')).resolve()==Path(record['glb']).resolve() for o in x.get('outputs',[]))]
     if len(images)!=1:raise ValueError('successful output image record not unique')
     item=images[0];matches=[x for x in item['outputs'] if Path(x['path']).resolve()==Path(record['glb']).resolve()]
@@ -139,6 +165,8 @@ def verify_run_provenance(record,artifact_hash):
 
     Explicit evidence schema until the inference writer's native schema is
     integrated: trellis.fixed-frame-run-evidence.v1. Unknown schemas fail closed.
+    按 schema 分派溯源校验：trellis.inference-run.v2 走原生校验；历史 v1 evidence 需逐项自证；
+    未知 schema 一律 fail-closed（结果保持 provenance_unverified/fail，绝不放行）。
     """
     path=record.get('run_manifest_path')
     if not path:return {'status':'provenance_unverified','reason':'historical declarations/log lines do not prove complete flags, seed and loaded weights'}
@@ -173,6 +201,9 @@ def verify_run_provenance(record,artifact_hash):
         return {'status':'fail' if isinstance(e,UnsafeRunContract) else 'provenance_unverified','path':str(p),'reason':f'{type(e).__name__}: {e}'}
 
 def evaluate_record(record,reference_angle=10,review=None):
+    """评估单条记录并给出三态结论：证据缺失/不安全 -> fail；溯源未证实或 PCA 轴歧义 -> unverified；
+    只有 artifact + orientation + geometry_not_worse + provenance 全部 pass 才汇总为 pass。
+    """
     result={'record':record,'artifact_status':'missing','orientation_reference_status':'unverified',
             'geometry_not_worse_status':'unverified','acceptance_status':'unverified'}
     review=review or {}
@@ -198,6 +229,7 @@ def evaluate_record(record,reference_angle=10,review=None):
         metrics=mesh_metrics(world_mesh(scene),reference_angle)
         result.update(artifact_status='pass',metrics=metrics,orientation_reference_status=metrics['orientation_reference_status'])
         # Ambiguous PCA never silently establishes orientation.
+        # PCA 主次轴接近时不得默默给出朝向结论，保持 unverified。
         if metrics['surface_pca']['axis_ambiguous']:result['orientation_reference_status']='unverified'
         if result['orientation_reference_status']=='fail' or result['geometry_not_worse_status']=='fail':result['acceptance_status']='fail'
         elif result['orientation_reference_status']=='pass' and result['geometry_not_worse_status']=='pass' and result['provenance_status']=='verified':result['acceptance_status']='pass'
@@ -215,6 +247,9 @@ def evaluate_record(record,reference_angle=10,review=None):
     return result
 
 def existing_manifest(root):
+    """内置历史实验清单：base / old33k / axis10 三个 tag × 图片 001..004。
+    只声明历史契约、GLB 与日志路径，不加载 checkpoint 张量；实际是否合规仍由上面的溯源校验判定。
+    """
     root=Path(root).resolve();records=[]
     for tag in ['base','old33k','axis10']:
         for n in ['001','002','003','004']:
@@ -235,8 +270,12 @@ def existing_manifest(root):
     return {'schema':'trellis.fixed-frame-inputs.v1','records':records}
 
 def run(manifest,output,reference_angle=10,reviews=None):
+    """批量评估 manifest 中所有记录，写 <output>/report.json 与 input_manifest.json。
+    聚合口径：任一 fail 则整体 fail；否则全部 pass 才 pass；其余为 unverified。
+    """
     if not np.isfinite(reference_angle) or not 0<=reference_angle<=90:raise ValueError('angle must be finite 0..90')
     output=Path(output)
+    # 输出目录必须不存在：避免覆盖上一次的验收报告。
     if output.exists():raise FileExistsError(output)
     output.mkdir(parents=True)
     reviews=reviews or {};results=[]
@@ -254,6 +293,7 @@ def run(manifest,output,reference_angle=10,reviews=None):
     return report
 
 def main():
+    """CLI 入口：--root 与 --manifest 只能给一个；--manual-reviews 提供人工几何评审判定（pass/fail 需 reviewer+evidence+rationale）。"""
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--root');parser.add_argument('--manifest');parser.add_argument('--output',required=True);parser.add_argument('--reference-angle',type=float,default=10);parser.add_argument('--manual-reviews')
     args=parser.parse_args()
     if bool(args.root)==bool(args.manifest):parser.error('provide exactly one of --root or --manifest')

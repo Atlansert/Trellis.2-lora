@@ -1,3 +1,15 @@
+"""用 Blender 批量渲染条件视角（多视角 RGB/A 图 + transforms.json）。
+
+- 用途：数据重建流水线的渲染步骤：为每个已下载资产在球面上采样若干相机位姿并渲染，
+  产物是供 SS/shape/PBR latent 与多视角视角对齐使用的条件渲染图。
+- 输入：--root（含 metadata.csv）、--download_root/raw/ 的本地资产、--num_cond_views 视角数（默认 16）。
+- 输出：<render_cond_root>/renders_cond/<sha256>/（各视角图 + transforms.json，含 yaw_deg 等帧信息）
+  以及 renders_cond/new_records/part_<rank>.csv（增量进度）。
+- 关键约定：相机方向用 Hammersley 球面序列采样（utils.sphere_hammersley_sequence），
+  半径/视场在 fov 10°~70° 之间随机采样；渲染引擎 CYCLES、条件图分辨率 1024；
+  以 transforms.json 是否存在判断对象已完成（可中断续跑）。
+- 用法：python render_cond.py <dataset_module> --root <dir> [--num_cond_views 16] [--max_workers 8]
+"""
 import os
 import json
 import copy
@@ -18,6 +30,7 @@ BLENDER_LINK = 'https://download.blender.org/release/Blender3.0/blender-3.0.1-li
 BLENDER_INSTALLATION_PATH = '/tmp'
 BLENDER_PATH = f'{BLENDER_INSTALLATION_PATH}/blender-3.0.1-linux-x64/blender'
 
+# 若 /tmp 下没有 Blender 3.0.1（含运行库依赖）就下载安装；已有则直接复用。
 def _install_blender():
     if not os.path.exists(BLENDER_PATH):
         os.system('sudo apt-get update')
@@ -26,6 +39,8 @@ def _install_blender():
         os.system(f'tar -xvf {BLENDER_INSTALLATION_PATH}/blender-3.0.1-linux-x64.tar.xz -C {BLENDER_INSTALLATION_PATH}')
 
 
+# 单对象任务：采样条件相机（Hammersley 球面方向 + 随机半径/视场），调用
+# blender_script/render_cond.py 渲染；以 transforms.json 是否生成作为成功判据。
 def _render_cond(file_path, metadatum, root, num_cond_views):
     sha256 = metadatum['sha256']
     # Build conditional view camera
@@ -37,6 +52,8 @@ def _render_cond(file_path, metadatum, root, num_cond_views):
         yaws.append(y)
         pitchs.append(p)
     fov_min, fov_max = 10, 70
+    # 由视场角反推相机半径（保持物体外接球刚好入画），再做面积守恒的均匀采样：
+    # 先采样 1/k^2 得半径，再由半径反解 fov。
     radius_min = np.sqrt(3) / 2 / np.sin(fov_max / 360 * np.pi)
     radius_max = np.sqrt(3) / 2 / np.sin(fov_min / 360 * np.pi)
     k_min = 1 / radius_max**2
@@ -44,6 +61,7 @@ def _render_cond(file_path, metadatum, root, num_cond_views):
     ks = np.random.uniform(k_min, k_max, (1000000,))
     radius = [1 / np.sqrt(k) for k in ks]
     fov = [2 * np.arcsin(np.sqrt(3) / 2 / r) for r in radius]
+    # 注意：radius/fov 是 1e6 个候选，下面的 zip 只取前 num_cond_views 个与 yaw/pitch 配对。
     cond_views = [{'yaw': y, 'pitch': p, 'radius': r, 'fov': f} for y, p, r, f in zip(yaws, pitchs, radius, fov)]
     
     args = [
@@ -64,6 +82,7 @@ def _render_cond(file_path, metadatum, root, num_cond_views):
         return {'sha256': sha256, 'cond_rendered': True}
 
 
+# CLI 入口：以 datasets.<sys.argv[1]> 为数据集适配模块；import utils 依赖当前工作目录（脚本同目录）。
 if __name__ == '__main__':
     dataset_utils = importlib.import_module(f'datasets.{sys.argv[1]}')
 
@@ -143,4 +162,5 @@ if __name__ == '__main__':
     func = partial(_render_cond, root=opt.render_cond_root, num_cond_views=opt.num_cond_views)
     cond_rendered = dataset_utils.foreach_instance(metadata, opt.render_cond_root, func, max_workers=opt.max_workers, desc='Rendering objects')
     cond_rendered = pd.concat([cond_rendered, pd.DataFrame.from_records(records)])
+    # 每个 rank 写自己的进度分片。
     cond_rendered.to_csv(os.path.join(opt.render_cond_root, 'renders_cond', 'new_records', f'part_{opt.rank}.csv'), index=False)

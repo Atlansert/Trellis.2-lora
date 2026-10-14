@@ -1,3 +1,15 @@
+"""在 Blender 内部按给定相机位姿渲染条件视角（入口，含 CLI）。
+
+- 用途：被 data_toolkit/render_cond.py 调用：接收 JSON 视角列表，逐视角渲染条件图。
+- 调用方式：blender -b -P render_cond.py -- --object model.glb --cond_views '<json>'
+  --cond_output_folder <dir> [--cond_resolution 1024] [--engine CYCLES]。
+- 输入：--object（GLB/OBJ/BLEND 等）、--cond_views（[{yaw,pitch,radius,fov}, ...] 的 JSON 字符串）。
+- 输出：<cond_output_folder>/NNN.png 与 transforms.json（含 aabb/scale/offset 与逐帧
+  file_path/camera_angle_x/transform_matrix）。
+- 关键约定：相机 local Y 对齐世界 Z 轴、注视原点；每个视角重新随机布光（1~3 个点光 + 白色环境光）
+  以获得光照多样性；模型归一化到 [-0.5,0.5]³。注意：本路径写出的帧不含 yaw_deg
+  （带 yaw_deg 的帧由 render_view.py 那条路径产生）。
+"""
 import argparse, sys, os, math, re, glob
 from typing import *
 import bpy
@@ -80,6 +92,7 @@ def init_scene() -> None:
         bpy.data.images.remove(image, do_unlink=True)
         
 
+# 相机注视原点：负 Z 轴指向目标，相机 local Y（画面竖直方向）对齐世界 Z 轴。
 def init_camera():
     cam = bpy.data.objects.new('Camera', bpy.data.cameras.new('Camera'))
     bpy.context.collection.objects.link(cam)
@@ -95,6 +108,7 @@ def init_camera():
     return cam
 
 
+# 纯白环境光：不新增任何方向光，得到干净一致的底色。
 def init_uniform_lighting():
     # Clear existing lights
     bpy.ops.object.select_all(action="DESELECT")
@@ -126,6 +140,8 @@ def init_uniform_lighting():
     links.new(bg_node.outputs["Background"], output_node.inputs["Surface"])
 
 
+# 随机布光：放 1~3 个点光，亮度按“朝向相机的分量”归一，避免出现全黑逆光视角；
+# 摄像机方向 camera_dir 用于计算该分量。
 def init_random_lighting(camera_dir: np.ndarray) -> None:
     # Clear existing lights
     bpy.ops.object.select_all(action="DESELECT")
@@ -349,6 +365,7 @@ def normalize_scene() -> Tuple[float, Vector]:
     return scale, offset
 
 
+# 由世界矩阵提取 4x4 变换：前 3 行为旋转 3x3 + 平移，最后一行补 [0,0,0,1]。
 def get_transform_matrix(obj: bpy.types.Object) -> list:
     pos, rt, _ = obj.matrix_world.decompose()
     rt = rt.to_matrix()
@@ -363,6 +380,7 @@ def get_transform_matrix(obj: bpy.types.Object) -> list:
     return matrix
 
 
+# 主流程：加载/清理场景 → 归一化 → 建相机与光照 → 按 --cond_views 逐视角随机布光渲染并记录相机参数。
 def main(arg):
     if arg.object.endswith(".blend"):
         delete_invisible_objects()
@@ -402,6 +420,7 @@ def main(arg):
             view['radius'] * cam_dir[1],
             view['radius'] * cam_dir[2]
         )
+        # 由视场角（弧度）换算焦距：sensor 宽 32（半宽 16），lens = 16 / tan(fov/2)。
         cam.data.lens = 16 / np.tan(view['fov'] / 2)
         
         bpy.context.scene.render.filepath = os.path.join(arg.cond_output_folder, f'{i:03d}.png')
@@ -423,6 +442,7 @@ def main(arg):
         json.dump(to_export, f, indent=4)
 
         
+# 在 Blender 内运行：只解析 `--` 之后的参数（之前的属于 Blender 自身）。
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Renders given obj file by rotation a camera around it.')
     parser.add_argument('--object', type=str, help='Path to the 3D model file to be rendered.')

@@ -6,6 +6,9 @@
 ⚠️ 2026-10-11 更正：这里原先写"SS 输出期望长度轴 = z"是错的。实测下游把 SS 占据体
 的**第 2 轴（h）**当长度轴。`--ss_swap_yz` 做的正是 h↔w 交换，因此它只是在给训歪的
 模型打补丁；真正的根因是训练目标是混合帧，见 HANDOFF §6.1-13。
+
+输入：--root 下的 sweep_* 目录（每个取 001.glb）+ --metrics-dir 下的 metrics_<step>_<组>.json。
+输出：stdout 对照表（步数/长轴/朝向/平滑度）；只读，不写文件，缺指标文件该列显示 —。
 """
 import os
 import re
@@ -17,12 +20,14 @@ import numpy as np
 
 
 def bbox_of(p):
+    """只读 GLB 的包围盒尺寸 (x,y,z)，不加载材质，用于判断长度轴落在哪根轴上。"""
     import trimesh
     m = trimesh.load(p, force='mesh', process=False, skip_materials=True)
     return np.asarray(m.bounds[1] - m.bounds[0], dtype=float)
 
 
 def main():
+    """遍历 sweep 产物 + 对应指标 JSON，按 (组别, 步数) 排序打印对照表；无产物时返回 1。"""
     ap = argparse.ArgumentParser()
     ap.add_argument('--root', default='results_infer')
     ap.add_argument('--metrics-dir', default='/tmp')
@@ -33,13 +38,13 @@ def main():
         if not os.path.isfile(g) or os.path.getsize(g) == 0:
             continue
         tag = os.path.basename(d)
-        m = re.search(r'_(\d{7})_', tag)
+        m = re.search(r'_(\d{7})_', tag)          # 目录名里的 7 位训练步数
         step = int(m.group(1)) if m else -1
         kind = 'B 规范帧' if 'canonical' in tag else 'A 视角帧'
         b = bbox_of(g)
         ax = 'xyz'[int(np.argmax(b))]
         # 指标文件
-        mj = os.path.join(a.metrics_dir, f'metrics_{step}_{kind[0]}.json')
+        mj = os.path.join(a.metrics_dir, f'metrics_{step}_{kind[0]}.json')   # mesh_metrics 的输出
         mm = None
         if os.path.isfile(mj):
             try:

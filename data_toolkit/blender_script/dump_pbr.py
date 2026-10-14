@@ -1,3 +1,14 @@
+"""在 Blender 内部把模型的 PBR 材质与贴图导出成 pickle。
+
+- 用途：被 data_toolkit/dump_pbr.py 调用：解析 Principled BSDF 节点树，导出 GLB 风格的材质参数
+  （baseColor/metallic/roughness/alpha 的 factor 与 PNG 贴图字节）+ 已归一化网格。
+- 调用方式：blender -b -P dump_pbr.py -- --object model.glb --output_path /tmp/out.pickle。
+- 输出：pickle {'materials': [...], 'objects': [...]}；材质解析失败时写 <output_path>_error.txt
+  （内容是节点名列表）并抛 RuntimeError，供调用方读取错误细节。
+- 关键约定：只支持 Principled BSDF + 特定的节点子树（TEX_IMAGE / SEPARATE_COLOR / MIX(MULTIPLY) /
+  MATH），不支持的结构直接失败而不是静默取默认值；metallic 取 B 通道、roughness 取 G 通道；
+  网格顶点已乘 matrix_world 并三角化，mat_ids 为 -1 表示无材质。
+"""
 import argparse, sys, os, math, io
 from typing import *
 import bpy
@@ -176,6 +187,7 @@ def normalize_scene() -> Tuple[float, Vector]:
 
 # =============== NODE TREE PARSING ===============
 
+# 把 Blender 图像节点转成 PNG 字节：按 channels 选通道、量化到 uint8，并保留插值/扩展方式。
 def extract_image(tex_node, channels):
         image = tex_node.image
         pixels = np.array(image.pixels[:])
@@ -206,6 +218,8 @@ def extract_image(tex_node, channels):
         }
 
 
+# 从节点链接里取出颜色贴图：RGB 直接来自 TEX_IMAGE 的 Color，单通道需经 SEPARATE_COLOR 拆分，
+# Alpha 走同名输出口；不支持的节点结构用 assert 直接失败（不静默兜底）。
 def try_extract_image(link, expected_channel='RGB'):
     """
     Tries to extract an image from a texture node link.
@@ -253,6 +267,8 @@ def try_extract_image(link, expected_channel='RGB'):
         return extract_image(tex_node, 3)
 
 
+# 把贴图与常数因子的乘积拆开：返回 (factor, 上层链接)。MIX(MULTIPLY)/MATH(MULTIPLY) 视为
+# “贴图 × 常数因子”的标准写法；否则 factor 取默认 1。
 def try_extract_factor(link, mode='color'):
     """
     Tries to extract a factor from a math node link.
@@ -289,6 +305,7 @@ def try_extract_factor(link, mode='color'):
         return (1.0, link)
 
 
+# 同时取出贴图与因子（颜色通道按 color 模式、单通道按 scalar 模式解析）。
 def try_extract_image_with_factor(link, expected_channel='RGB'):
     """
     Tries to extract an image and a factor from a texture node link.
@@ -298,6 +315,7 @@ def try_extract_image_with_factor(link, expected_channel='RGB'):
     return (factor, image)
 
 
+# 主流程：初始化场景 → 归一化 → 逐材质解析 Principled BSDF → 逐对象导出顶点/面/UV/mat_ids。
 def main(arg):    
     # Initialize context
     if arg.object.endswith(".blend"):
@@ -353,6 +371,8 @@ def main(arg):
                     pack["baseColorTexture"] = image
 
             # Handle alpha
+            # alpha 的处理分支最多：VALUE 常量、MATH(ROUND) 视为 MASK、MATH(SUBTRACT)+LESS_THAN 组合
+            # 会额外记录 alphaCutoff（阈值取自 LESS_THAN 的常量输入）。
             if not principled_node.inputs['Alpha'].is_linked:
                 pack["alphaFactor"] = principled_node.inputs['Alpha'].default_value
                 if pack["alphaFactor"] < 1.0:
@@ -413,6 +433,7 @@ def main(arg):
 
             output['materials'].append(pack)
         except:
+            # 任一材质节点结构不受支持即整体失败：把节点名写进 *_error.txt 便于定位，然后抛错。
             with open(arg.output_path + '_error.txt', 'w') as f:
                 f.write(str([[n.name] for n in mat.node_tree.nodes]))
             raise RuntimeError("Material is not supported")
@@ -474,6 +495,7 @@ def main(arg):
     print('[INFO] Output saved to {}.'.format(arg.output_path))
 
         
+# 在 Blender 内运行：只解析 `--` 之后的参数（之前的属于 Blender 自身）。
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Renders given obj file by rotation a camera around it.')
     parser.add_argument('--object', type=str, help='Path to the 3D model file to be rendered.')

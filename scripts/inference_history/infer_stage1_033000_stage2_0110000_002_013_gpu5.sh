@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：Stage1 SS LoRA 33000 + Stage2 shape LoRA 110000 推理，输入 data_test_sel110k（002..013 共 7 张），固定 GPU 5。
+# 用法：bash scripts/inference_history/infer_stage1_033000_stage2_0110000_002_013_gpu5.sh（无参数）。
+# 输出：结果追加进已有目录 results_infer/data_test_stage1_lora_033000_stage2_lora_0110000_001/（GLB + run.log/infer.log）。
+# 边界：会 mkdir/写入该输出目录并跑 GPU 推理（--no_video）；跑完 GLB 数不足则退出码 3。
 # Inference: Stage1 SS LoRA step 33000 + Stage2 shape-flow LoRA step 110000
 # on data_test_sel110k (002..013, 7 images), GPU 5.
 # Output appended to existing dir: data_test_stage1_lora_033000_stage2_lora_0110000_001

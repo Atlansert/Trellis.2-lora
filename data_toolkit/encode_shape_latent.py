@@ -1,3 +1,15 @@
+"""把双网格（.vxz）编码成 shape latent。
+
+- 用途：数据重建流水线的一步：读 dual_grid_<res>/<sha256>.vxz 的对偶网格顶点与相交标志，
+  组成稀疏张量后用 shape 编码器（默认 TRELLIS.2-4B 的 shape_enc_next_dc_f16c32_fp16）编码。
+- 输入：--root（含 metadata.csv）、--dual_grid_root/dual_grid_<resolution>/、--enc_pretrained
+  或 --enc_model/--ckpt/--model_root（自训练编码器）。
+- 输出：<shape_latent_root>/shape_latents/<latent_name>/<sha256>.npz，键 'feats'/'coords'；
+  进度分片 new_records/part_<rank>.csv，并据此跳过已处理对象。
+- 关键约定：只处理 metadata 中 dual_grid_converted=True 的对象；coords 落盘时去掉批次维并转 uint8；
+  输入或输出出现 NaN/Inf 一律跳过，不写坏数据；支持 --rank/--world_size 分片。
+- 用法：python encode_shape_latent.py --root <dir> [--resolution 1024] [--filter_low_aesthetic_score 4.5]
+"""
 import os
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
@@ -17,9 +29,11 @@ import trellis2.modules.sparse as sp
 
 torch.set_grad_enabled(False)
 
+# 稀疏张量健全性检查：特征与坐标都必须是有限值。
 def is_valid_sparse_tensor(tensor):
     return torch.isfinite(tensor.feats).all() and torch.isfinite(tensor.coords).all()
 
+# CUDA 出错后同步并清空缓存，避免后续对象继续失败。
 def clear_cuda_error():
     torch.cuda.synchronize()
     torch.cuda.empty_cache()
@@ -54,6 +68,7 @@ if __name__ == '__main__':
     opt.shape_latent_root = opt.shape_latent_root or opt.root
 
     if opt.enc_model is None:
+        # 用预训练编码器：latent 目录名由模型名+分辨率决定，避免不同编码器的结果混写。
         latent_name = f'{opt.enc_pretrained.split("/")[-1]}_{opt.resolution}'
         encoder = models.from_pretrained(opt.enc_pretrained).eval().cuda()
     else:
@@ -98,6 +113,7 @@ if __name__ == '__main__':
     records = []
     
     # filter out objects that are already processed
+    # 中文：先用线程池并发探测已存在的 npz，从待处理列表里剔除，实现可中断续跑。
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor, \
         tqdm(total=len(metadata), desc="Filtering existing objects") as pbar:
         def check_sha256(sha256):
@@ -119,6 +135,8 @@ if __name__ == '__main__':
          ThreadPoolExecutor(max_workers=32) as saver_executor:
 
         def loader(sha256):
+            # 加载线程：读 .vxz 的对偶顶点/相交标志；顶点值 0..255 归一到 [0,1]，
+            # 并在坐标前补一列批次索引 0（稀疏张量约定为 (batch, x, y, z)）。
             try:
                 coords, attr = o_voxel.io.read_vxz(
                     os.path.join(opt.dual_grid_root, f'dual_grid_{opt.resolution}', f'{sha256}.vxz'),
@@ -129,6 +147,7 @@ if __name__ == '__main__':
                     torch.cat([torch.zeros_like(coords[:, 0:1]), coords], dim=-1),
                 )
                 intersected = vertices.replace(torch.cat([
+                    # 打包成一个 uint8 的三方向相交标志按位还原：bit0/bit1/bit2。
                     attr['intersected'] % 2,
                     attr['intersected'] // 2 % 2,
                     attr['intersected'] // 4 % 2,
@@ -141,6 +160,7 @@ if __name__ == '__main__':
         loader_executor.map(loader, sha256s)
         
         def saver(sha256, pack):
+            # 落盘线程：写 npz 并追加进度记录（tokens = 体素数），供下次续跑使用。
             save_path = os.path.join(opt.shape_latent_root, 'shape_latents', latent_name, f'{sha256}.npz')
             np.savez_compressed(save_path, **pack)
             records.append({'sha256': sha256, 'shape_latent_encoded': True, 'shape_latent_tokens': pack['coords'].shape[0]})
@@ -174,6 +194,7 @@ if __name__ == '__main__':
                 saver_executor.submit(saver, sha256, pack)
 
             except Exception as e:
+                # 注意：若异常发生在 num_voxels 赋值之前，这行打印会再抛 NameError（原有行为，未改动）。
                 print(f"[Error] {sha256} ({num_voxels} voxels): {e}")
                 clear_cuda_error()
                 continue
@@ -181,4 +202,5 @@ if __name__ == '__main__':
         saver_executor.shutdown(wait=True)
         
     records = pd.DataFrame.from_records(records)
+    # 每个 rank 写自己的进度分片，避免多进程写同一文件。
     records.to_csv(os.path.join(opt.shape_latent_root, 'shape_latents', latent_name, 'new_records', f'part_{opt.rank}.csv'), index=False)

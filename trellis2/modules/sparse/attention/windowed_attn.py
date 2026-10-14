@@ -1,3 +1,12 @@
+"""稀疏窗口注意力（windowed / shifted-window）：只在 3D 局部窗口内做 self/cross attention。
+
+流程：calc_window_partition 把每个点映射到它所属的窗口（坐标加 shift 后整除 window_size，
+再编码成一个整数窗口 id），argsort 得到重排索引 fwd_indices，使同一窗口的点在序列上连续；
+然后把重排后的 feats 按窗口分段（seq_lens -> cu_seqlens / BlockDiagonalMask）交给
+flash-attn / xformers 的 varlen 接口，算完后用 bwd_indices 还原原顺序。
+shift_window 即 Swin 式的窗口偏移，用于跨窗口信息交换。
+"""
+
 from typing import *
 import torch
 import math
@@ -34,20 +43,20 @@ def calc_window_partition(
     shift_window = (shift_window,) * DIM if isinstance(shift_window, int) else shift_window
     window_size = (window_size,) * DIM if isinstance(window_size, int) else window_size
     shifted_coords = tensor.coords.clone().detach()
-    shifted_coords[:, 1:] += torch.tensor(shift_window, device=tensor.device, dtype=torch.int32).unsqueeze(0)
+    shifted_coords[:, 1:] += torch.tensor(shift_window, device=tensor.device, dtype=torch.int32).unsqueeze(0)  # 窗口偏移
 
     MAX_COORDS = [i + j for i, j in zip(tensor.spatial_shape, shift_window)]
-    NUM_WINDOWS = [math.ceil((mc + 1) / ws) for mc, ws in zip(MAX_COORDS, window_size)]
+    NUM_WINDOWS = [math.ceil((mc + 1) / ws) for mc, ws in zip(MAX_COORDS, window_size)]  # 每个空间维的窗口数
     OFFSET = torch.cumprod(torch.tensor([1] + NUM_WINDOWS[::-1]), dim=0).tolist()[::-1]
 
-    shifted_coords[:, 1:] //= torch.tensor(window_size, device=tensor.device, dtype=torch.int32).unsqueeze(0)
-    shifted_indices = (shifted_coords * torch.tensor(OFFSET, device=tensor.device, dtype=torch.int32).unsqueeze(0)).sum(dim=1)
-    fwd_indices = torch.argsort(shifted_indices)
+    shifted_coords[:, 1:] //= torch.tensor(window_size, device=tensor.device, dtype=torch.int32).unsqueeze(0)  # 坐标 -> 窗口下标
+    shifted_indices = (shifted_coords * torch.tensor(OFFSET, device=tensor.device, dtype=torch.int32).unsqueeze(0)).sum(dim=1)  # (batch, wx, wy, wz) 编码为一个整数
+    fwd_indices = torch.argsort(shifted_indices)  # 按窗口排序：同窗口的点连续
     bwd_indices = torch.empty_like(fwd_indices)
-    bwd_indices[fwd_indices] = torch.arange(fwd_indices.shape[0], device=tensor.device)
-    seq_lens = torch.bincount(shifted_indices)
+    bwd_indices[fwd_indices] = torch.arange(fwd_indices.shape[0], device=tensor.device)  # 逆置换，用于还原顺序
+    seq_lens = torch.bincount(shifted_indices)  # 每个窗口的点数（= 分段注意力的段长）
     mask = seq_lens != 0
-    seq_lens = seq_lens[mask]
+    seq_lens = seq_lens[mask]  # 去掉空窗口
     
     if config.ATTN == 'xformers':
         if 'xops' not in globals():
@@ -84,6 +93,7 @@ def sparse_windowed_scaled_dot_product_self_attention(
 
     serialization_spatial_cache_name = f'windowed_attention_{window_size}_{shift_window}'
     serialization_spatial_cache = qkv.get_spatial_cache(serialization_spatial_cache_name)
+    # 分区索引按 (window_size, shift_window) 缓存，同一坐标集重复使用
     if serialization_spatial_cache is None:
         fwd_indices, bwd_indices, seq_lens, attn_func_args = calc_window_partition(qkv, window_size, shift_window)
         qkv.register_spatial_cache(serialization_spatial_cache_name, (fwd_indices, bwd_indices, seq_lens, attn_func_args))
@@ -114,7 +124,7 @@ def sparse_windowed_scaled_dot_product_self_attention(
             import flash_attn
         out = flash_attn.flash_attn_varlen_qkvpacked_func(qkv_feats, **attn_func_args)  # [M, H, C]
 
-    out = out[bwd_indices]      # [T, H, C]
+    out = out[bwd_indices]      # [T, H, C] 还原为原始点顺序
 
     if config.DEBUG:
         qkv_coords = qkv_coords[bwd_indices]
@@ -165,6 +175,7 @@ def sparse_windowed_scaled_dot_product_cross_attention(
 
     assert len(q_seq_lens) == len(kv_seq_lens), "Number of sequences in q and kv must match"
 
+    # cross 版：q 与 kv 各自按自己的窗口分区重排，段一一对应做窗口内交叉注意力
     q_feats = q.feats[q_fwd_indices]      # [M, H, C]
     kv_feats = kv.feats[kv_fwd_indices]    # [M, 2, H, C]
 
@@ -185,6 +196,6 @@ def sparse_windowed_scaled_dot_product_cross_attention(
             max_seqlen_q=q_attn_func_args['max_seqlen'], max_seqlen_k=kv_attn_func_args['max_seqlen'],
         )  # [M, H, C]
 
-    out = out[q_bwd_indices]      # [T, H, C]
+    out = out[q_bwd_indices]      # [T, H, C] 还原为原始点顺序
 
     return q.replace(out)

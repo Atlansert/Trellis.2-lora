@@ -1,3 +1,11 @@
+"""稀疏结构（SS）潜变量数据集与可视化 mixin。
+
+职责：SparseStructureLatent 从 metadata 过滤样本并读取 ss_latent/*.npz 里的 z（按需标准化）；
+SparseStructureLatentVisMixin 加载 SS 解码器把潜变量解码成占据体素，渲染 4 视角彩色图。
+输入：roots 与 min_aesthetic_score/normalization 等配置；输出：样本 {'x_0': z}。
+契约：z 的标准化/反标准化必须使用同一套 normalization 统计；可视化时占用阈值取 z>0。
+"""
+
 import os
 import json
 from typing import *
@@ -11,6 +19,8 @@ from ..utils.render_utils import yaw_pitch_r_fov_to_extrinsics_intrinsics
 
 
 class SparseStructureLatentVisMixin:
+    """SS 潜变量可视化 mixin：惰性加载 SS 解码器（本地 ckpt 或预训练）并渲染体素占据。"""
+
     def __init__(
         self,
         *args,
@@ -26,6 +36,7 @@ class SparseStructureLatentVisMixin:
         self.ss_dec_ckpt = ss_dec_ckpt
         
     def _loading_ss_dec(self):
+        # 优先本地目录 config.json + ckpt，否则从预训练仓库加载 SS 解码器
         if self.ss_dec is not None:
             return
         if self.ss_dec_path is not None:
@@ -43,6 +54,7 @@ class SparseStructureLatentVisMixin:
 
     @torch.no_grad()
     def decode_latent(self, z, batch_size=4):
+        """把 SS 潜变量解码为占据体素：先反归一化，分批解码后拼回；用毕释放解码器省显存。"""
         self._loading_ss_dec()
         ss = []
         if self.normalization:
@@ -58,11 +70,13 @@ class SparseStructureLatentVisMixin:
         x_0 = x_0 if isinstance(x_0, torch.Tensor) else x_0['x_0']
         x_0 = self.decode_latent(x_0.cuda())
         
+        # 体素渲染器：512 分辨率 + 4x SSAA 抗锯齿
         renderer = VoxelRenderer()
         renderer.rendering_options.resolution = 512
         renderer.rendering_options.ssaa = 4
         
         # build camera
+        # 4 个方位角（每 90°，整体偏 -16°）+ 20° 俯仰；半径 2、fov 30°
         yaw = [0, np.pi/2, np.pi, 3*np.pi/2]
         yaw_offset = -16 / 180 * np.pi
         yaw = [y + yaw_offset for y in yaw]
@@ -72,6 +86,7 @@ class SparseStructureLatentVisMixin:
         images = []
         
         # Build each representation
+        # 取 z>0 的体素作为占用点；颜色用坐标/resolution 归一化，便于区分空间位置
         x_0 = x_0.cuda()
         for i in range(x_0.shape[0]):
             coords = torch.nonzero(x_0[i, 0] > 0, as_tuple=False)
@@ -99,6 +114,8 @@ class SparseStructureLatentVisMixin:
 class SparseStructureLatent(SparseStructureLatentVisMixin, StandardDatasetBase):
     """
     Sparse structure latent dataset
+    
+    稀疏结构潜变量数据集：过滤 metadata 后读取 ss_latent 里的 z（可选标准化）。
     
     Args:
         roots (str): path to the dataset
@@ -135,6 +152,8 @@ class SparseStructureLatent(SparseStructureLatentVisMixin, StandardDatasetBase):
     def filter_metadata(self, metadata):
         stats = {}
         # Locally prepared datasets may not have run the final metadata merge.
+        # 中文：本地准备的数据可能没跑最终 metadata 合并——若列不存在就跳过该条件，
+        # 只要 ss_latent 目录存在，其文件即为权威来源。
         # When the requested SS latent directory is supplied, its files are
         # authoritative and the base metadata is still sufficient.
         if 'ss_latent_encoded' in metadata.columns:
@@ -145,6 +164,7 @@ class SparseStructureLatent(SparseStructureLatentVisMixin, StandardDatasetBase):
         return metadata, stats
                 
     def get_instance(self, root, instance):
+        # 读取 ss_latent/<sha256>.npz 中的 z，并按 normalization 做标准化
         latent = np.load(os.path.join(root['ss_latent'], f'{instance}.npz'))
         z = torch.tensor(latent['z']).float()
         if self.normalization is not None:
@@ -159,6 +179,7 @@ class SparseStructureLatent(SparseStructureLatentVisMixin, StandardDatasetBase):
 class ImageConditionedSparseStructureLatent(ImageConditionedMixin, SparseStructureLatent):
     """
     Image-conditioned sparse structure dataset
+    单图条件版 SS 数据集：cond 由 components.ImageConditionedMixin 提供。
     """
     pass
     

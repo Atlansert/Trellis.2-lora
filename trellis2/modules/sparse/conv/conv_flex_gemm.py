@@ -1,3 +1,11 @@
+"""flex_gemm 后端的稀疏卷积（默认后端，纯 CUDA kernel，无需 spconv/torchsparse）。
+
+仅支持子流形卷积：stride=1 且 padding=None，即输出 coords 与输入完全一致。
+权重布局被 permute 成 (Co, Kd, Kh, Kw, Ci) 以匹配 kernel 的期望；
+邻居表（neighbor map）按 kernel 尺寸+dilation 缓存在 spatial_cache 中复用，
+计算本身通过 flex_gemm.ops.spconv.sparse_submanifold_conv3d 完成。
+"""
+
 import math
 import torch
 import torch.nn as nn
@@ -8,6 +16,7 @@ from flex_gemm.ops.spconv import sparse_submanifold_conv3d
 
 
 def sparse_conv3d_init(self, in_channels, out_channels, kernel_size, stride=1, dilation=1, padding=None, bias=True, indice_key=None):
+    # 后端限制：只做子流形卷积
     assert stride == 1 and (padding is None), 'Currently flex_gemm implementation only support submanifold sparse convolution (stride=1, padding=None)'
     
     self.in_channels = in_channels
@@ -35,14 +44,16 @@ def sparse_conv3d_init(self, in_channels, out_channels, kernel_size, stride=1, d
 
 
 def sparse_conv3d_forward(self, x: SparseTensor) -> SparseTensor:
+    # 每次前向注入全局算法/哈希表比例配置
     flex_gemm.ops.spconv.set_algorithm(config.FLEX_GEMM_ALGO)
     flex_gemm.ops.spconv.set_hashmap_ratio(config.FLEX_GEMM_HASHMAP_RATIO)
 
     # check if neighbor map is already computed
-    Co, Kd, Kh, Kw, Ci = self.weight.shape
+    Co, Kd, Kh, Kw, Ci = self.weight.shape  # 权重为 (Co, Kd, Kh, Kw, Ci)
     neighbor_cache_key = f'SubMConv3d_neighbor_cache_{Kw}x{Kh}x{Kd}_dilation{self.dilation}'
     neighbor_cache = x.get_spatial_cache(neighbor_cache_key)
     
+    # 输出 coords 与输入相同（子流形），故只需 x.replace 更新 feats
     out, neighbor_cache_ = sparse_submanifold_conv3d(
         x.feats,
         x.coords,

@@ -1,3 +1,9 @@
+"""零散通用工具：嵌套字典操作、图像拼接/加标注文字、调试用的容差函数。
+
+- dict_* 系列对嵌套 dict 递归处理（merge/foreach/reduce/any/all/flatten），叶子值由调用方给定函数处理。
+- make_grid / notes_on_image / text_image 用于把多视图渲染结果拼成可视化大图并写说明。
+- save_image_with_notes 接受 float 或 uint8 图（float 会 ×255 并裁剪），RGB 转 BGR 后写盘。
+"""
 import re
 import numpy as np
 import cv2
@@ -120,6 +126,7 @@ def dict_flatten(dic, sep='.'):
 # Context utils
 @contextlib.contextmanager
 def nested_contexts(*contexts):
+    """把多个 contextmanager 工厂（调用后返回 ctx）一次性进入，退出时按栈序关闭。"""
     with contextlib.ExitStack() as stack:
         for ctx in contexts:
             stack.enter_context(ctx())
@@ -128,6 +135,7 @@ def nested_contexts(*contexts):
 
 # Image utils
 def make_grid(images, nrow=None, ncol=None, aspect_ratio=None):
+    """把同一尺寸的图按行列拼成网格；只给 aspect_ratio 时按比例推算行数。"""
     num_images = len(images)
     if nrow is None and ncol is None:
         if aspect_ratio is not None:
@@ -154,6 +162,7 @@ def make_grid(images, nrow=None, ncol=None, aspect_ratio=None):
 
 
 def notes_on_image(img, notes=None):
+    """在图底部补 32 像素黑边并用 OpenCV 写上说明文字（进出都是 RGB）。"""
     img = np.pad(img, ((0, 32), (0, 0), (0, 0)), 'constant', constant_values=0)
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     if notes is not None:
@@ -333,6 +342,7 @@ def text_image(text, resolution=(512, 512), max_size=0.5, h_align="left", v_alig
     return img
 
 
+# 输入可为 torch 张量(CHW)或 numpy；float 图会 ×255 并按 uint8 裁剪
 def save_image_with_notes(img, path, notes=None):
     """
     Save an image with notes.

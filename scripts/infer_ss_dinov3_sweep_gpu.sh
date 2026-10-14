@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：推理扫描的单档任务：shape flow 固定 20k，SS LoRA（DINOv3@512 重训版）取指定步数，只跑 data_test/001.png。
+# 用法：bash scripts/infer_ss_dinov3_sweep_gpu.sh <ss_step> <gpu>（步数补零到 7 位拼权重名）。
+# 输出：results_infer/sweep_ss_dinov3_<step>_shape20k/（001.glb、run.log、infer.log）；已有 001.glb 则跳过。
+# 边界：会 mkdir 输出目录并调用 infer_finetuned.py（GPU 推理、--no_video）；权重缺失退 2、无输出 GLB 退 3。
 # Task 4 推理扫描：shape flow 固定 20k，SS LoRA（DINOv3@512 重训版）从 10k 到 50k 每 10k 一档，
 # 对 data_test/001.png 各推理一次。
 #

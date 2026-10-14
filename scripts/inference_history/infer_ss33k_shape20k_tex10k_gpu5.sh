@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：data_test 全量推理：SS LoRA 33000 + Shape Flow LoRA 20000 + Tex Flow LoRA 10000，固定 GPU 5。
+# 用法：bash scripts/inference_history/infer_ss33k_shape20k_tex10k_gpu5.sh（无参数）。
+# 输出：results_infer/data_test_ss33k_shape20k_texflow10k/（GLB、run.log、infer.log）；已有等量 GLB 则跳过。
+# 边界：会 mkdir 输出目录并跑 GPU 推理（--no_video）；跑完 GLB 数不足则退出码 3。
 # SS LoRA 33000 + Shape Flow LoRA 20000 + Tex Flow LoRA 10000 on data_test, GPU 5.
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"

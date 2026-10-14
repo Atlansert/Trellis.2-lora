@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：单图 data_test/001.png 推理：Stage1 SS LoRA 33000 + Stage2 shape LoRA 110000，固定 GPU 5。
+# 用法：bash scripts/inference_history/infer_stage1_033000_stage2_0110000_001_gpu5.sh（无参数）。
+# 输出：results_infer/data_test_stage1_lora_033000_stage2_lora_0110000_001/（001.glb、run.log、infer.log）。
+# 边界：会 mkdir 输出目录并跑 GPU 推理（--no_video）；没产出 001.glb 则退出码 3。
 # Inference: Stage1 SS LoRA step 33000 + Stage2 shape-flow LoRA step 110000
 # on data_test/001.png only, GPU 5.
 # Output: results_infer/data_test_stage1_lora_033000_stage2_lora_0110000_001/

@@ -11,6 +11,14 @@ blender_dump ↔ dual_grid 的 y/z 对齐（HANDOFF §6.1-4 只为 PBR/shape 管
 
 输出：<root>/<output_name>/<obj>/NNN.npz，键名与既有目录一致（'mean'），
 可直接换数据集的 ss_view_latent 指向使用。
+
+中文说明：
+- 用途：生成“已做 y/z 对齐”的逐视角 SS latent，从数据层治本修复，替代推理侧的 --ss_swap_yz。
+- 输入：<root>/<voxel_name>/<obj>/NNN.npz 的 coords；--encoder 为 SS 编码器（需要 GPU）。
+- 输出：<root>/<output_name>/<obj>/NNN.npz，键 'mean'，可直接替换数据集的 ss_view_latent 指向。
+- 关键约定：体素化逐轴独立，所以在**体素坐标层**交换 y/z（[0,2,1]）等价于先交换网格轴再体素化，
+  无需重跑 open3d；默认开启且不可通过命令行关闭（--swap_yz 默认 True）。
+- 用法：python encode_ss_view_latents_yz.py --root <dir> [--voxel_name ...] [--output_name ...]
 """
 import os
 import sys
@@ -25,6 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import trellis2.models as models  # noqa: E402
 
 
+# CLI 入口：逐批交换 y/z → 栅格化 → SS 编码 → 写 'mean'。
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--root', required=True)

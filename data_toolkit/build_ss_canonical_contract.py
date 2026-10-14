@@ -4,6 +4,16 @@
 Only existing native-alpha (symlink) objects are admitted by default. Derived
 alpha stays quarantined until independently reviewed; native alpha is also
 provisional, not a guarantee of semantic segmentation quality. No axis fixes.
+
+中文说明：
+- 用途：从已有数据集里筛出“姿态受限”的规范（canonical）子集，只读取、不修改旧数据。
+- 输入：--root 数据根目录（需含 metadata.csv、renders_cond_t/、ss_latents_views_canon/、
+  ss_view_voxels_canon_v4/），--output 新的输出目录（必须不存在），--max-angle 姿态角上限（默认 10）。
+- 输出：output/canonical/<object>.npz（目标 latent）、manifest.json（逐对象记录+哈希）、
+  summary.json（统计）、COMPLETE.json（标记 training_approved=False）。
+- 关键约定：默认只接纳 native-alpha（符号链接）对象；derived alpha 一律隔离待人工复核；
+  角度缓存只用于枚举候选，全部验收几何都由真实体素重算；不做任何坐标轴修正。
+- 运行：python build_ss_canonical_contract.py --root <dir> --output <newdir> [--max-angle 10]
 """
 import argparse, csv, hashlib, json, os
 from pathlib import Path
@@ -11,12 +21,15 @@ import numpy as np
 from PIL import Image
 SCHEMA='trellis.canonical-contract.v1'
 
+# 分块计算文件 SHA-256，用于 manifest 里的完整性/溯源校验。
 def digest(path):
     h=hashlib.sha256()
     with open(path,'rb') as f:
         for b in iter(lambda:f.read(1024*1024),b''): h.update(b)
     return h.hexdigest()
 
+# 由网格64体素坐标估计朝向：按既有编码器约定先置换成 (z,x,y)，再做 PCA，
+# 返回夹角（度）、各轴跨度(+1 计数)、最大/次大特征值比。坐标非法时抛 ValueError。
 def pose(coords):
     c=np.asarray(coords)
     if c.ndim!=2 or c.shape[1]!=3 or len(c)<4 or not np.isfinite(c).all():
@@ -30,9 +43,11 @@ def pose(coords):
             'spans':(np.ptp(c,axis=0)+1).astype(int).tolist(),
             'eigen_ratio':float(ev[-1]/ev[-2])}
 
+# 姿态合格判据：偏航夹角 ≤ max_angle、最长跨度落在轴 1（长度轴）、特征值比 ≥ 3。
 def valid_pose(p,max_angle):
     return p['angle_degrees']<=max_angle and int(np.argmax(p['spans']))==1 and p['eigen_ratio']>=3
 
+# 读取 SS 均值 npz（要求 key='mean'），并强制校验形状 (8,16,16,16)、fp32、全有限。
 def read_mean(path):
     with np.load(path,allow_pickle=False) as z:
         if 'mean' not in z: raise ValueError('required mean key missing')
@@ -41,6 +56,7 @@ def read_mean(path):
         raise ValueError('invalid fp32 SS mean')
     return a
 
+# 把帧记录里的相对路径安全解析为对象根目录下的真实文件；拒绝绝对路径与 .. 穿越。
 def relative_frame(objroot,frame):
     rel=Path(frame['file_path'])
     if rel.is_absolute() or '..' in rel.parts: raise ValueError('unsafe frame path')
@@ -48,6 +64,8 @@ def relative_frame(objroot,frame):
     if not p.is_file():raise FileNotFoundError(p)
     return p
 
+# 主流程：筛选合格对象 → 校验前 24 帧 yaw 序列、体素姿态与掩码 → 暂存目标 latent 与逐对象记录，
+# 最后写 manifest.json / summary.json / COMPLETE.json。输出目录必须不存在（防止覆盖旧版本）。
 def stage(root,output,max_angle):
     root=Path(root).resolve(); output=Path(output).resolve()
     if not 0<=max_angle<=90:raise ValueError('max angle must be finite 0..90')
@@ -127,6 +145,7 @@ def stage(root,output,max_angle):
     if exceptions:raise RuntimeError(f'{len(exceptions)} object errors; staging not approved')
     (output/'COMPLETE.json').write_text(json.dumps({'manifest_sha256':digest(output/'manifest.json'),'summary_sha256':digest(output/'summary.json'),'training_approved':False},indent=2),encoding='utf-8')
 
+# CLI：--root 数据根目录，--output 新输出目录，--max-angle 允许的最大姿态角（默认 10 度）。
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('--root',required=True);p.add_argument('--output',required=True);p.add_argument('--max-angle',type=float,default=10)
     args=p.parse_args()

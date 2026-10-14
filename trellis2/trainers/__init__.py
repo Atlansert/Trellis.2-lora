@@ -1,5 +1,15 @@
+"""trainers 包入口：按需（惰性）导出各训练器类与子模块。
+
+职责：在 __attributes 中登记「类名 -> 相对子模块路径」，首次访问属性时才 import，
+避免一次性加载全部训练器（含 VAE / flow matching / transformers 等重依赖）。
+输入：`from trellis2.trainers import XXXTrainer` 之类的属性访问。
+输出：对应的训练器类，或子模块本身。
+契约：新增训练器需同时登记到 __attributes；类名必须与目标模块内定义的名字一致。
+"""
+
 import importlib
 
+# 惰性导入表：键为对外暴露的名字，值为相对本包的子模块路径
 __attributes = {
     'BasicTrainer': 'basic',
     
@@ -22,11 +32,13 @@ __attributes = {
     'DinoV3FeatureExtractor': 'flow_matching.mixins.image_conditioned',
 }
 
+# 以子模块形式导出的名字（当前为空）
 __submodules = []
 
 __all__ = list(__attributes.keys()) + __submodules
 
 def __getattr__(name):
+    # PEP 562 模块级 __getattr__：首次访问时才真正 import 并缓存进 globals()
     if name not in globals():
         if name in __attributes:
             module_name = __attributes[name]
@@ -40,7 +52,7 @@ def __getattr__(name):
     return globals()[name]
 
 
-# For Pylance
+# For Pylance（仅供静态检查/直接运行本文件时补全符号，不参与运行时导入路径）
 if __name__ == '__main__':
     from .basic import BasicTrainer
 

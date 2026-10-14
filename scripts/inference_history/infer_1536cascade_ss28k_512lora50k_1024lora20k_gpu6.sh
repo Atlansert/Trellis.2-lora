@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ── 中文摘要 ─────────────────────────────────────────────
+# 用途：1536_cascade 整链推理（data_test 全量）：SS LoRA 28k + 512 LoRA 50k + 1024 LoRA 20k，固定 GPU 6。
+# 用法：bash scripts/inference_history/infer_1536cascade_ss28k_512lora50k_1024lora20k_gpu6.sh（无参数）。
+# 输出：results_infer/data_test_1536cascade_ss28k_512lora50k_1024lora20k/（GLB + infer.log）。
+# 边界：会 mkdir 输出目录并跑 GPU 推理（--no_video）；没有幂等跳过判断，重跑会覆盖同名 GLB。
 # 1536_cascade inference: ss 28k + 512 LoRA 50k + 1024 LoRA 20k
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"

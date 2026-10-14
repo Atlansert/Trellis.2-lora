@@ -1,3 +1,9 @@
+"""分布式训练小工具：进程组初始化、文件广播读取、模型解包与“主进程先行”同步。
+
+- read_file_dist 只让 rank0 真正读文件，再广播大小与内容，避免所有进程重复读盘（需 CUDA）。
+- master_first / local_master_first 让主进程（或每台机器的 local rank0）先执行，
+  常用于先建目录/写文件，其它 rank 用 barrier 等待。
+"""
 import os
 import io
 from contextlib import contextmanager
@@ -7,6 +13,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 
 def setup_dist(rank, local_rank, world_size, master_addr, master_port):
+    """设置 DDP 环境变量、绑定当前进程的 local_rank 显卡并初始化 nccl 进程组。"""
     os.environ['MASTER_ADDR'] = master_addr
     os.environ['MASTER_PORT'] = master_port
     os.environ['WORLD_SIZE'] = str(world_size)

@@ -1,3 +1,15 @@
+"""汇总各处理阶段的进度记录，生成/更新总表 metadata.csv 与 statistics.txt。
+
+- 用途：数据集元数据的“合并器”：把各目录 new_records/part_*.csv（各阶段产出的标记列）合并进
+  metadata.csv，并把已合并的分片移到 merged_records/ 归档。
+- 输入：<root>/metadata.csv（或首次由 datasets.<dataset_module>.get_metadata 生成），
+  以及 raw/、thumbnails/、renders_cond/、mesh_dumps/、pbr_dumps/、asset_stats/、
+  dual_grid_<res>/、pbr_voxels_<res>/、ss_latents/<model>/、shape_latents/<model>/、pbr_latents/<model>/。
+- 输出：<root>/metadata.csv（主键 sha256）与 <root>/statistics.txt（各阶段数量统计）。
+- 关键约定：以 new_records/part_*.csv 为增量来源，合并后归档到 merged_records/<时间戳>_<原名>；
+  --from_merged_records 改为从归档重建，--record_start 可跳过早期归档；已存在 metadata.csv 时不再重建。
+- 用法：python build_metadata.py <dataset_module> --root <dir> [--from_merged_records] [--record_start N]
+"""
 import os
 import shutil
 import sys
@@ -8,6 +20,8 @@ import pandas as pd
 from easydict import EasyDict as edict
 
 
+# 合并某个阶段目录下的分片记录：读 new_records（或 merged_records）→ 按 sha256 合并进
+# metadata.csv → 把分片归档到 merged_records/<timestamp>_<name>。无数据时返回现有表或 None。
 def update_metadata(path, opt):
     if not os.path.exists(path):
         return None
@@ -15,6 +29,7 @@ def update_metadata(path, opt):
     os.makedirs(os.path.join(path, 'merged_records'), exist_ok=True)
     os.makedirs(os.path.join(path, 'new_records'), exist_ok=True)
     if opt.from_merged_records:
+        # 从归档分片重建：文件名形如 <时间戳>_part_<rank>.csv，按时间戳下限过滤。
         df_files = [f for f in os.listdir(os.path.join(path, 'merged_records')) if f.endswith('.csv')]
         df_files = [f for f in df_files if int(f.split('_')[0]) >= opt.record_start]
     else:
@@ -46,6 +61,7 @@ def update_metadata(path, opt):
     return None
 
 
+# CLI 入口：以 datasets.<sys.argv[1]> 作为数据集适配模块，其余参数见文件顶部说明。
 if __name__ == '__main__':
     dataset_utils = importlib.import_module(f'datasets.{sys.argv[1]}')
 
@@ -109,6 +125,8 @@ if __name__ == '__main__':
         metadata.to_csv(os.path.join(opt.root, 'metadata.csv'), index=False)
     
     # merge downloaded
+    # 中文：以下按处理阶段顺序合并各自的 new_records 分片（下载/缩略图/美学分/条件渲染/
+    # mesh dump/PBR dump/资产统计/双网格/PBR 体素/SS latent/shape latent/PBR latent）。
     downloaded_metadata = update_metadata(os.path.join(opt.download_root, 'raw'), opt)
 
     # merge thumbnails
@@ -172,6 +190,7 @@ if __name__ == '__main__':
         pbr_latent_metadata[model] = update_metadata(os.path.join(opt.pbr_latent_root, f'pbr_latents/{model}'), opt)
 
     # statistics
+    # 中文：把各阶段的对象数量写成 statistics.txt（缺某个阶段时该行自动省略）。
     num_downloaded = downloaded_metadata['local_path'].count() if downloaded_metadata is not None else 0
     with open(os.path.join(opt.root, 'statistics.txt'), 'w') as f:
         f.write('Statistics:\n')
