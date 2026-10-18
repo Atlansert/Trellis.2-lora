@@ -234,3 +234,26 @@ __marimo__/
 *.zip
 *.bak*
 *.tmp
+
+# Required model metadata and third-party Python definitions (never weights)
+!/assets/example_texturing/the_forgotten_knight.ply
+!/checkpoints/
+/checkpoints/*
+!/checkpoints/*.json
+!/checkpoints/ckpts/
+/checkpoints/ckpts/*
+!/checkpoints/ckpts/*.json
+!/dinov3/
+/dinov3/*
+!/dinov3/*.json
+!/dinov3/*.md
+!/rmbg/
+/rmbg/*
+!/rmbg/*.json
+!/rmbg/*.py
+!/rmbg/*.md
+*.bin
+*.onnx
+
+# Blender USDZ importer source archive required by preprocessing
+!/data_toolkit/blender_script/io_scene_usdz.zip

@@ -2,9 +2,9 @@
 
 Chinese railway vehicle LoRA training and inference extensions for [Microsoft TRELLIS.2](https://github.com/microsoft/TRELLIS.2).
 
-This is a **code-only repository**: source, configurations, regression tests and native dependency source are included; datasets, model weights and experiment outputs are not. Read [project status and evaluation rules](docs/PROJECT_STATUS.md) before using historical experiment configurations. Current work freezes the original SS33k and focuses on shape detail. Test photographs have no paired 3D ground truth.
+This is a **code-only repository**: source, configurations, regression tests, native dependency source, model metadata and upstream demo resources are included; datasets, model weights and experiment outputs are not. Read [project status and evaluation rules](docs/PROJECT_STATUS.md) before using historical experiment configurations. Current work freezes the original SS33k and focuses on shape detail. Test photographs have no paired 3D ground truth.
 
-The original upstream overview follows. For upstream example assets and pretrained weights, use the linked upstream project.
+The original upstream overview follows. Pretrained weights must be obtained separately; see the external prerequisites in the project status document.
 
 ---
 
@@ -76,8 +76,8 @@ Data processing is streamlined for instant conversions that are fully **renderin
 ### Installation Steps
 1. Clone the repo:
     ```sh
-    git clone -b main https://github.com/microsoft/TRELLIS.2.git --recursive
-    cd TRELLIS.2
+    git clone -b main https://github.com/Atlansert/Trellis.2-lora.git --recursive
+    cd Trellis.2-lora
     ```
 
 2. Install the dependencies:
