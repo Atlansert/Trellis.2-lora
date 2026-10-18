@@ -1,0 +1,112 @@
+{
+  "models": {
+    "denoiser": {
+      "name": "SparseStructureFlowModel",
+      "args": {
+        "resolution": 16,
+        "in_channels": 8,
+        "out_channels": 8,
+        "model_channels": 1536,
+        "cond_channels": 1024,
+        "num_blocks": 30,
+        "num_heads": 12,
+        "mlp_ratio": 5.3334,
+        "pe_mode": "rope",
+        "share_mod": true,
+        "initialization": "scaled",
+        "qk_rms_norm": true,
+        "qk_rms_norm_cross": true,
+        "dtype": "bfloat16"
+      }
+    }
+  },
+  "pretrained": {
+    "denoiser": "checkpoints/ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors"
+  },
+  "lora": {
+    "enabled": true,
+    "models": [
+      "denoiser"
+    ],
+    "rank": 8,
+    "alpha": 8.0,
+    "dropout": 0.0,
+    "targets": [
+      "self_attn.to_qkv",
+      "self_attn.to_out",
+      "cross_attn.to_q",
+      "cross_attn.to_kv",
+      "cross_attn.to_out"
+    ]
+  },
+  "dataset": {
+    "name": "ImageConditionedSparseStructureLatentViews",
+    "args": {
+      "min_aesthetic_score": 4.5,
+      "num_views": 24,
+      "image_size": 512,
+      "crop_scale": 1.0,
+      "crop_scale_jitter": [1.0, 1.5],
+      "latent_frame": "canonical",
+      "canonical_latent_root": "./training_data/pool1302/train/ss_latents_canon",
+      "min_view_aspect": 0.0,
+      "max_view_offaxis": 10.0
+    }
+  },
+  "trainer": {
+    "name": "ImageConditionedFlowMatchingCFGTrainer",
+    "args": {
+      "max_steps": 30000,
+      "batch_size_per_gpu": 4,
+      "batch_split": 2,
+      "optimizer": {
+        "name": "AdamW",
+        "args": {
+          "lr": 0.0001,
+          "weight_decay": 0.0
+        }
+      },
+      "ema_rate": [
+        0.9999
+      ],
+      "mix_precision_mode": "amp",
+      "mix_precision_dtype": "bfloat16",
+      "grad_clip": {
+        "name": "AdaptiveGradClipper",
+        "args": {
+          "max_norm": 1.0,
+          "clip_percentile": 95
+        }
+      },
+      "i_log": 100,
+      "i_sample": 2000,
+      "i_save": 2000,
+      "p_uncond": 0.1,
+      "t_schedule": {
+        "name": "logitNormal",
+        "args": {
+          "mean": 1.0,
+          "std": 1.0
+        }
+      },
+      "sigma_min": 1e-05,
+      "image_cond_model": {
+        "name": "DinoV3FeatureExtractor",
+        "args": {
+          "model_name": "./dinov3",
+          "image_size": 512
+        }
+      },
+      "snapshot_sampler_params": {
+        "steps": 12,
+        "guidance_strength": 7.5,
+        "guidance_rescale": 0.7,
+        "guidance_interval": [
+          0.6,
+          1.0
+        ],
+        "rescale_t": 5.0
+      }
+    }
+  }
+}

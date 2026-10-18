@@ -23,7 +23,7 @@ class ImageConditionedSparseStructureLatentViews(Dataset):
     中文：每个渲染视角配一份"把网格旋转到该视角相机系"后的 SS 潜变量。
     """
     def __init__(self, roots: str, *, image_size=512, min_aesthetic_score=0.0,
-                 crop_scale=1.2, skip_snapshot=True,
+                 crop_scale=1.2, crop_scale_jitter=None, skip_snapshot=True,
                  num_views=24, latent_frame='view',
                  canonical_latent_root=None, min_view_aspect=0.0,
                  max_view_offaxis=None, canonical_manifest=None,
@@ -44,6 +44,7 @@ class ImageConditionedSparseStructureLatentViews(Dataset):
             self._contract_root, self._contract_objects=load_canonical_contract(
                 canonical_manifest, canonical_latent_root, allow_staged=allow_staged_contract)
         self.crop_scale=float(crop_scale)
+        self.crop_scale_jitter=None if crop_scale_jitter is None else tuple(float(x) for x in crop_scale_jitter)
         self.min_view_aspect=float(min_view_aspect)
         if self.min_view_aspect < 0:
             raise ValueError('min_view_aspect must be >= 0 (0 = 不过滤视角)')
@@ -56,6 +57,9 @@ class ImageConditionedSparseStructureLatentViews(Dataset):
         # crop_scale 必须 >= 1：裁剪框相对物体包围盒的放大倍数（1.0 = 刚好贴边，与推理一致）
         if self.crop_scale < 1.0:
             raise ValueError('crop_scale must be >= 1.0 (1.0 = 物体占满画面，与推理一致)')
+        if self.crop_scale_jitter is not None:
+            if len(self.crop_scale_jitter) != 2 or not (1.0 <= self.crop_scale_jitter[0] <= self.crop_scale_jitter[1]):
+                raise ValueError('crop_scale_jitter must be [low, high] with 1.0 <= low <= high')
         if min_aesthetic_score < 0:
             raise ValueError('min_aesthetic_score must be non-negative')
         self.value_range=(0,1); self.normalization=None
@@ -199,10 +203,11 @@ class ImageConditionedSparseStructureLatentViews(Dataset):
     def __len__(self): return len(self.instances)
     def _image(self,p):
         """读图并裁到 alpha 包围盒（按 crop_scale 放大），缩放到 image_size 后乘 alpha 去背景。"""
-        im=Image.open(p).convert('RGBA'); a=np.array(im.getchannel(3)); ys,xs=np.nonzero(a)
+        im=Image.open(p).convert('RGBA'); a=np.array(im.getchannel('A')); ys,xs=np.nonzero(a)
         if len(xs):
             cx=(xs.min()+xs.max())/2; cy=(ys.min()+ys.max())/2
-            hs=max(xs.max()-xs.min(),ys.max()-ys.min())/2*self.crop_scale
+            scale=self.crop_scale if self.crop_scale_jitter is None else float(np.random.uniform(*self.crop_scale_jitter))
+            hs=max(xs.max()-xs.min(),ys.max()-ys.min())/2*scale
             im=im.crop((int(cx-hs),int(cy-hs),int(cx+hs),int(cy+hs)))
         im=im.resize((self.image_size,self.image_size),Image.Resampling.LANCZOS)
         a=torch.from_numpy(np.array(im.getchannel(3))).float()/255

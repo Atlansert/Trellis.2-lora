@@ -1,26 +1,32 @@
 #!/usr/bin/env bash
 # ── 中文摘要 ─────────────────────────────────────────────
-# 用途：Texture SLat Flow (1024) LoRA 训练（r8/a8、只挂 5 个 attention 目标），以官方 imgshape2tex 1.3B 1024 为底。
-# 用法：bash scripts/run_tex_flow_lora.sh [GPU 号，默认 6]；--ckpt latest 表示从已有 checkpoint 续训。
-# 数据：pbr_latents + shape_latents（坐标已对齐）+ renders_cond；输出：results/multiview_1186_tex_flow_lora_1024/。
-# 边界：长跑 GPU 训练任务，持续写该输出目录；只读 training_data/ 与 configs/。
-# Texture SLat Flow (1024) LoRA training — rank8/alpha8, 5 attention targets,
-# pretrained on official imgshape2tex 1.3B 1024, data: pbr_latents + shape_latents
-# (coords-aligned) + renders_cond. Modeled on the successful stage2 shape-flow
-# LoRA recipe (EMA 0.9999, logitNormal, p_uncond 0.1, lr 1e-4).
+# 【已废弃 · DEPRECATED 2026-10-17】请改用 scripts/run_tex_flow_lora_pool1302.sh。
+#
+# 为什么废弃：本脚本指向 training_data/multiview_1186 与 --ckpt latest。该数据集已经不存在
+# （旧数据清理时被删），所以脚本一定跑不起来；tex 训练的数据入口已经换成 pool1302。
+#
+# 替代：bash scripts/run_tex_flow_lora_pool1302.sh [GPU号，默认6]
+#   - 配置 configs/gen/tex_flow_lora_1024_pool1302.json（= 官方 tex 配方，只改 max_steps 30000 / i_save 2000）
+#   - 数据 training_data/pool1302/train（tex 口径 817 对象）
+#   - 输出 results/pool1302_tex_flow_lora_1024/，--ckpt none 全新训练
+#
+# 保留本文件是为了让所有指向旧脚本的文档/脚本立刻拿到这条提示，而不是静默地用错数据训练。
+# [DEPRECATED] Texture SLat Flow (1024) LoRA — old multiview_1186 launcher,
+# superseded by scripts/run_tex_flow_lora_pool1302.sh. The dataset it points at
+# was deleted, so this launcher can no longer run. It refuses to start on purpose.
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
-PY="/home/test/miniconda3/envs/trellis2/bin/python"
-GPU="${1:-6}"
-export CUDA_VISIBLE_DEVICES="$GPU"
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-OUT="$ROOT/results/multiview_1186_tex_flow_lora_1024"
-DATA='{"train_data":{"base":"./training_data/multiview_1186","pbr_latent":"./training_data/multiview_1186/pbr_latents/tex_enc_next_dc_f16c32_fp16_1024","shape_latent":"./training_data/multiview_1186/shape_latents/shape_enc_next_dc_f16c32_fp16_1024","render_cond":"./training_data/multiview_1186/renders_cond"}}'
-cd "$ROOT"
-exec "$PY" train.py \
-  --config configs/gen/tex_flow_lora_1024_train.json \
-  --output_dir "$OUT" \
-  --ckpt latest \
-  --num_gpus 1 \
-  --data_dir "$DATA" \
-  --auto_retry 3
+cat >&2 <<'EOF'
+================================================================================
+[DEPRECATED] scripts/run_tex_flow_lora.sh 已废弃，不会启动任何训练。
+
+原因：它指向的 training_data/multiview_1186 已被删除（旧数据清理），
+      且用 --ckpt latest 续训旧输出，与 pool1302 数据口径不符。
+
+请改用：
+    bash scripts/run_tex_flow_lora_pool1302.sh [GPU号，默认6]
+
+新脚本：configs/gen/tex_flow_lora_1024_pool1302.json + training_data/pool1302/train
+        （tex 口径 817 对象）-> results/pool1302_tex_flow_lora_1024/
+================================================================================
+EOF
+exit 64
