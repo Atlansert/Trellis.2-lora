@@ -122,80 +122,11 @@ The pretrained model **TRELLIS.2-4B** is available on Hugging Face. Please refer
 
 ### 1. Image to 3D Generation
 
-#### Minimal Example
-
-Here is an [example](example.py) of how to use the pretrained models for 3D asset generation.
-
-```python
-import os
-os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # Can save GPU memory
-import cv2
-import imageio
-from PIL import Image
-import torch
-from trellis2.pipelines import Trellis2ImageTo3DPipeline
-from trellis2.utils import render_utils
-from trellis2.renderers import EnvMap
-import o_voxel
-
-# 1. Setup Environment Map
-envmap = EnvMap(torch.tensor(
-    cv2.cvtColor(cv2.imread('assets/hdri/forest.exr', cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB),
-    dtype=torch.float32, device='cuda'
-))
-
-# 2. Load Pipeline
-pipeline = Trellis2ImageTo3DPipeline.from_pretrained("microsoft/TRELLIS.2-4B")
-pipeline.cuda()
-
-# 3. Load Image & Run
-image = Image.open("assets/example_image/T.png")
-mesh = pipeline.run(image)[0]
-mesh.simplify(16777216) # nvdiffrast limit
-
-# 4. Render Video
-video = render_utils.make_pbr_vis_frames(render_utils.render_video(mesh, envmap=envmap))
-imageio.mimsave("sample.mp4", video, fps=15)
-
-# 5. Export to GLB
-glb = o_voxel.postprocess.to_glb(
-    vertices            =   mesh.vertices,
-    faces               =   mesh.faces,
-    attr_volume         =   mesh.attrs,
-    coords              =   mesh.coords,
-    attr_layout         =   mesh.layout,
-    voxel_size          =   mesh.voxel_size,
-    aabb                =   [[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
-    decimation_target   =   1000000,
-    texture_size        =   4096,
-    remesh              =   True,
-    remesh_band         =   1,
-    remesh_project      =   0,
-    verbose             =   True
-)
-glb.export("sample.glb", extension_webp=True)
-```
-
-Upon execution, the script generates the following files:
- - `sample.mp4`: A video visualizing the generated 3D asset with PBR materials and environmental lighting.
- - `sample.glb`: The extracted PBR-ready 3D asset in GLB format.
-
-**Note:** The `.glb` file is exported in `OPAQUE` mode by default. Although the alpha channel is preserved within the texture map, it is not active initially. To enable transparency, import the asset into your 3D software and manually connect the texture's alpha channel to the material's opacity or alpha input.
-
-#### Web Demo
-
-[app.py](app.py) provides a simple web demo for image to 3D asset generation. you can run the demo with the following command:
-```sh
-python app.py
-```
-
-Then, you can access the demo at the address shown in the terminal.
+原版 Gradio / 最小示例入口（`app.py`、`example.py`、`app_texturing.py`、`example_texturing.py`）已从本仓库删除，示例图和除 `forest.exr` 以外的 HDRI 也已删除。图像到 3D 使用仓库内推理脚本，例如根目录 `run_trellis.2.py`。训练可视化仍读取 `assets/hdri/forest.exr`。
 
 ### 2. PBR Texture Generation
 
-Please refer to the [example_texturing.py](example_texturing.py) for an example of how to generate PBR textures for a given 3D shape. Also, you can use the [app_texturing.py](app_texturing.py) to run a web demo for PBR texture generation.
-
+PBR 纹理走本仓库的 tex flow 配置和 `trellis2` 管线，不再提供原版贴图 Web Demo。
 
 ## 🏋️ Training
 

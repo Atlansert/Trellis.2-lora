@@ -55,7 +55,7 @@
   "trainer": {
     "name": "ImageConditionedFlowMatchingCFGTrainer",
     "args": {
-      "max_steps": 20000,
+      "max_steps": 30000,
       "batch_size_per_gpu": 4,
       "batch_split": 2,
       "optimizer": {

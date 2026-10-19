@@ -86,9 +86,6 @@
 | `configs/` | 训练配置 JSON，`gen/` 为生成模型、`scvae/` 为 VAE | ✅ 代码（配置） |
 | `train.py` | 训练入口 | ✅ 代码 |
 | `run_trellis.2.py` | 批量推理示例（固定 `CUDA_VISIBLE_DEVICES='7'`，读 `../single_side/*.png`） | ✅ 代码 |
-| `app.py` | Gradio 图像→3D 交互 Demo（多渲染模式 Normal/Clay/Base color/HDRI） | ✅ 代码 |
-| `app_texturing.py` | Gradio 网格贴图 Demo（`Trellis2TexturingPipeline`） | ✅ 代码 |
-| `example.py` / `example_texturing.py` | 官方最小可运行示例 | ✅ 代码 |
 | `o-voxel/` | 第三方依赖源码（`o_voxel.postprocess.to_glb`、`o_voxel.convert.flexible_dual_grid_to_mesh`） | ✅ 代码（第三方） |
 | `setup.sh` | 环境安装脚本（torch 2.6.0 / flash-attn / CuMesh / o-voxel / FlexGEMM / nvdiffrast） | ✅ 代码（脚本） |
 | `README.md` / `REPO_NOTES.md` / `HANDOFF*.md` / `*_AUDIT_*.md` / `REPORT_*.md` / `RECOVERY_STATUS_*.md` / `SECURITY.md` / `LICENSE` | 文档 | ✅ 文档 |
@@ -127,7 +124,7 @@
 | 状态 | 内容 |
 |---|---|
 | ✅ 已上传 | `trellis2/`、`scripts/`、`configs/`、`data_toolkit/`、`tests/`、`train.py`、`run_trellis.2.py`、`LICENSE`、`README.md`、`PROJECT_CODE_GUIDE.md` |
-| ❌ 未上传 | `nju/`、`results/`、`results_infer/`、`training_data/`、`data_for_train/`、`new_data*/`、`checkpoints/`、`trellis2_finetune_release/`、`rmbg/`、`dinov3/`、`o-voxel/`、`assets/`、`data_test/`、`3d_gen_online/`、`setup.sh`、`SECURITY.md`、`app.py`、`app_texturing.py`、`example.py`、`example_texturing.py`、`diagnostics/`、上游 `README.md`，以及交接/审计文档（`HANDOFF*`、`*AUDIT*`、`REPORT_*`、`RECOVERY_STATUS_*`） |
+| ❌ 未上传 | `nju/`、`results/`、`results_infer/`、`training_data/`、`data_for_train/`、`new_data*/`、`checkpoints/`、`trellis2_finetune_release/`、`rmbg/`、`dinov3/`、`o-voxel/`、`assets/`、`data_test/`、`3d_gen_online/`、`setup.sh`、`SECURITY.md`、`diagnostics/`、上游 `README.md`，以及交接/审计文档（`HANDOFF*`、`*AUDIT*`、`REPORT_*`、`RECOVERY_STATUS_*`） |
 
 > 注意：本章 2.1 表描述的是**本地项目**的完整结构，其中 `app*.py`、`example*.py`、`o-voxel/`、`setup.sh`、`diagnostics/`、上游 `README.md` **不在**代码镜像中。文中提到这些文件时，仅用于说明本地环境，不代表仓库内容。
 
@@ -635,17 +632,6 @@ CLI：`--root`（内置历史记录集）或 `--manifest`（二选一）、`--ou
    ├─ custom_prepare_data.py --data_dir --output_dir --resolutions --flat --conditions-only
    │     一次性准备：生成 dual-grid / 形状 dump / 条件渲染
    │
-   ├─ 逐视角 SS 支撑体 (voxels)
-   │     generate_ss_view_voxels.py            (基础)
-   │     generate_ss_view_voxels_canon.py      (--num_views --resolution --axis_map --signs --offset --perm)
-   │     generate_ss_view_voxels_mesh_t1.py    (TRELLIS.1 mesh 口径)
-   │     generate_ss_view_from_shape_coords.py (--source_name --output_name --workers --overwrite)
-   │
-   ├─ 逐视角 SS latent
-   │     encode_ss_view_latents.py        (--voxel_name --output_name --encoder --batch_size --resolution)
-   │     encode_ss_view_latents_canon.py  (+ --perm)
-   │     encode_ss_view_latents_yz.py     (+ --swap_yz)
-   │
    ├─ 规范帧 (canonical) 目标
    │     canonical_frame.py                  ← 坐标约定的唯一权威定义（§3.2）
    │     build_canon_canonical_latents.py    (--src --output_name --workers)
@@ -654,6 +640,8 @@ CLI：`--root`（内置历史记录集）或 `--manifest`（二选一）、`--ou
    └─ 渲染条件
          render_cond.py (顶层包装) → blender_script/render_cond.py
 ```
+
+逐视角体素/latent 生成脚本（`generate_ss_view_voxels*.py`、`encode_ss_view_latents*.py`、`generate_ss_view_from_shape_coords.py`）已删除；现行训练使用每对象唯一的 canonical SS latent，不再走逐视角支撑。
 
 **关系与产物落点**（与 `training_data/multiview_1186/` 的目录一一对应，已实测该目录内容）：
 `mesh_dumps` / `pbr_dumps` → `dual_grid_512`、`dual_grid_1024`（shape 输入）→ `shape_latents/*`；`pbr_dumps` → `pbr_voxels_1024` → `pbr_latents/*`；`ss_view_voxels_canon_v4` → `ss_latents_views_canon`（逐视角 SS 监督，供 `ImageConditionedSparseStructureLatentViews`）；`ss_latents_canon`（每对象唯一规范帧 latent，`latent_frame='canonical'` 时用）；`renders_cond`（原始视角渲染）与 `renders_cond_t`（带 `transforms.json`、`_view_aspect.json`、`_view_offaxis.json` 的契约化渲染，canonical 契约与 `max_view_offaxis` 过滤依赖它们）。
@@ -803,9 +791,7 @@ CUDA_VISIBLE_DEVICES='' $PY -m unittest discover -s tests -p test_fixed_frame_ac
 ### 9.5 官方示例 / Demo
 
 ```bash
-$PY example.py                 # 读 assets/example_image/*.png，输出 sample.mp4 / sample.glb（需 HF 或本地权重）
 $PY run_trellis.2.py           # 固定 CUDA_VISIBLE_DEVICES='7'，读 ../single_side/*.png
-python app.py                  # Gradio 交互 Demo
 $PY data_toolkit/build_metadata.py ObjaverseXL --source sketchfab --root datasets/ObjaverseXL_sketchfab
 ```
 
